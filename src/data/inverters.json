@@ -1,0 +1,94 @@
+{
+  "_comment": "Omvormer-database. 'available' per variant aan/uit. iacMax = max AC-uitgangsstroom (A). Sommige iacMax zijn berekend (pacNom/400V/√3) waar datasheet de AC-stroom niet expliciet gaf — CONTROLEER tegen datasheet. isGoodwe wordt afgeleid uit de familienaam in code.",
+  "families": [
+    {
+      "family": "GoodWe DNS G3 (1-fase)",
+      "source": "GW_DNS-G3",
+      "verified": false,
+      "variants": [
+        { "id": "GW3000-DNS-30", "pmax": 4500, "vmax": 600, "vmpptMin": 40, "vmpptMax": 560, "imppt": 16, "isc": 23, "nMppt": 2, "stringsPerMppt": 1, "pacNom": 3000, "iacMax": 14.4, "available": true },
+        { "id": "GW3600-DNS-30", "pmax": 5400, "vmax": 600, "vmpptMin": 40, "vmpptMax": 560, "imppt": 16, "isc": 23, "nMppt": 2, "stringsPerMppt": 1, "pacNom": 3600, "iacMax": 17.3, "available": true },
+        { "id": "GW4200-DNS-30", "pmax": 6300, "vmax": 600, "vmpptMin": 40, "vmpptMax": 560, "imppt": 16, "isc": 23, "nMppt": 2, "stringsPerMppt": 1, "pacNom": 4200, "iacMax": 20.1, "available": true },
+        { "id": "GW5000-DNS-30", "pmax": 7500, "vmax": 600, "vmpptMin": 40, "vmpptMax": 560, "imppt": 16, "isc": 23, "nMppt": 2, "stringsPerMppt": 1, "pacNom": 5000, "iacMax": 24.0, "available": true },
+        { "id": "GW6000-DNS-30", "pmax": 9000, "vmax": 600, "vmpptMin": 40, "vmpptMax": 560, "imppt": 16, "isc": 23, "nMppt": 2, "stringsPerMppt": 1, "pacNom": 6000, "iacMax": 28.8, "available": true }
+      ]
+    },
+    {
+      "family": "GoodWe XS G3 (1-fase EMEA)",
+      "source": "GW_XS-G3",
+      "verified": false,
+      "variants": [
+        { "id": "GW700-XS-30", "pmax": 1050, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 700, "iacMax": 3.2, "available": true },
+        { "id": "GW1000-XS-30", "pmax": 1500, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 1000, "iacMax": 4.6, "available": true },
+        { "id": "GW1500-XS-30", "pmax": 2250, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 1500, "iacMax": 6.9, "available": true },
+        { "id": "GW2000-XS-30", "pmax": 3000, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 2000, "iacMax": 9.1, "available": true },
+        { "id": "GW2500-XS-30", "pmax": 3750, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 2500, "iacMax": 11.4, "available": true },
+        { "id": "GW3000-XS-30", "pmax": 4500, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 3000, "iacMax": 13.7, "available": true }
+      ]
+    },
+    {
+      "family": "GoodWe SDT G3 (3-fase)",
+      "source": "SDT-G3",
+      "verified": false,
+      "variants": [
+        { "id": "GW25K-SDT-30", "pmax": 45000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 950, "imppt": 40, "isc": 50, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 25000, "iacMax": 37.9, "available": true },
+        { "id": "GW30K-SDT-30", "pmax": 54000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 950, "imppt": 42, "isc": 52.5, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 30000, "iacMax": 45.5, "available": true },
+        { "id": "GW33K-SDT-C30", "pmax": 59400, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 40, "isc": 56, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 33000, "iacMax": 50.1, "available": true },
+        { "id": "GW36K-SDT-C30", "pmax": 64800, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 40, "isc": 56, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 36000, "iacMax": 54.6, "available": true },
+        { "id": "GW40K-SDT-C30", "pmax": 72000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 40, "isc": 56, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 40000, "iacMax": 60.7, "available": true },
+        { "id": "GW40K-SDT-P30", "pmax": 72000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 40, "isc": 56, "nMppt": 4, "stringsPerMppt": 2, "pacNom": 40000, "iacMax": 60.6, "available": true }
+      ]
+    },
+    {
+      "family": "AlphaESS SMILE-G3 T15/T20 (3-fase hybride)",
+      "source": "alphaess_smile-g3-t15-t20",
+      "verified": false,
+      "variants": [
+        { "id": "SMILE-G3-T15", "pmax": 30000, "vmax": 1000, "vmpptMin": 200, "vmpptMax": 850, "imppt": 18, "isc": 22.5, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 15000, "iacMax": 24.0, "available": true },
+        { "id": "SMILE-G3-T20", "pmax": 40000, "vmax": 1000, "vmpptMin": 200, "vmpptMax": 850, "imppt": 18, "isc": 22.5, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 20000, "iacMax": 32.0, "available": true }
+      ]
+    },
+    {
+      "family": "AlphaESS SMILE-G3 T4-T10 (3-fase hybride)",
+      "source": "alphaess_smile-g3-t4-t10",
+      "verified": false,
+      "variants": [
+        { "id": "SMILE-G3-T4", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 4000, "iacMax": 7.3, "available": true },
+        { "id": "SMILE-G3-T5", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 5000, "iacMax": 9.1, "available": true },
+        { "id": "SMILE-G3-T6", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 6000, "iacMax": 11.0, "available": true },
+        { "id": "SMILE-G3-T8", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 8000, "iacMax": 14.5, "available": true },
+        { "id": "SMILE-G3-T10", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 10000, "iacMax": 18.1, "available": true }
+      ]
+    },
+    {
+      "family": "AlphaESS STORION H30/H50-G3 (3-fase C&I hybride)",
+      "source": "alphaess_storion-h30-h50",
+      "verified": false,
+      "variants": [
+        { "id": "STORION-H30-G3", "pmax": 60000, "vmax": 1000, "vmpptMin": 200, "vmpptMax": 850, "imppt": 40, "isc": 50, "nMppt": 4, "stringsPerMppt": 2, "pacNom": 30000, "iacMax": 45.5, "available": true },
+        { "id": "STORION-H50-G3", "pmax": 75000, "vmax": 1000, "vmpptMin": 330, "vmpptMax": 850, "imppt": 40, "isc": 50, "nMppt": 4, "stringsPerMppt": 2, "pacNom": 50000, "iacMax": 75.8, "available": true }
+      ]
+    },
+    {
+      "family": "Huawei SUN2000 MB0 (3-fase)",
+      "source": "SUN2000_MB0",
+      "verified": false,
+      "variants": [
+        { "id": "SUN2000-12K-MB0", "pmax": 18000, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 12000, "iacMax": 19.1, "available": true },
+        { "id": "SUN2000-15K-MB0", "pmax": 22500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 15000, "iacMax": 23.9, "available": true },
+        { "id": "SUN2000-17K-MB0", "pmax": 25500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 17000, "iacMax": 27.1, "available": true },
+        { "id": "SUN2000-20K-MB0", "pmax": 30000, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 20000, "iacMax": 31.9, "available": true },
+        { "id": "SUN2000-25K-MB0", "pmax": 37500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 25000, "iacMax": 39.9, "available": true }
+      ]
+    },
+    {
+      "family": "Huawei SUN2000 KTL-M2 (3-fase grootverbruik)",
+      "source": "SUN2000_KTL_M2",
+      "verified": false,
+      "variants": [
+        { "id": "SUN2000-100KTL-M2", "pmax": 150000, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 30, "isc": 40, "nMppt": 10, "stringsPerMppt": 2, "pacNom": 100000, "iacMax": 160.4, "available": true },
+        { "id": "SUN2000-115KTL-M2", "pmax": 172500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 30, "isc": 40, "nMppt": 10, "stringsPerMppt": 2, "pacNom": 115000, "iacMax": 182.3, "available": true }
+      ]
+    }
+  ]
+}

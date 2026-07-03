@@ -1,0 +1,75 @@
+{
+  "_comment": "Panelen-database. Elke variant heeft 'available' om aan/uit te zetten per leverancier. CONTROLEER elke elektrische waarde tegen de originele datasheet voordat productief gebruik. betaVoc in %/°C (negatief).",
+  "families": [
+    {
+      "family": "JA Solar JAM54D41 GB (430 serie)",
+      "source": "jam54d41-410-435-gb",
+      "betaVoc": -0.26,
+      "vsysMax": 1500,
+      "verified": false,
+      "variants": [
+        { "id": "JAM54D41-410/GB", "wp": 410, "voc": 37.82, "vmp": 31.37, "isc": 13.95, "imp": 13.07, "available": true },
+        { "id": "JAM54D41-415/GB", "wp": 415, "voc": 37.92, "vmp": 31.59, "isc": 14.02, "imp": 13.14, "available": true },
+        { "id": "JAM54D41-420/GB", "wp": 420, "voc": 38.05, "vmp": 31.80, "isc": 14.09, "imp": 13.21, "available": true },
+        { "id": "JAM54D41-425/GB", "wp": 425, "voc": 38.20, "vmp": 32.01, "isc": 14.16, "imp": 13.28, "available": true },
+        { "id": "JAM54D41-430/GB", "wp": 430, "voc": 38.32, "vmp": 32.21, "isc": 14.23, "imp": 13.35, "available": true },
+        { "id": "JAM54D41-435/GB", "wp": 435, "voc": 38.45, "vmp": 32.42, "isc": 14.30, "imp": 13.42, "available": true }
+      ]
+    },
+    {
+      "family": "JA Solar JAM60D42 LB (530 serie)",
+      "source": "JAM60D42_LB",
+      "betaVoc": -0.25,
+      "vsysMax": 1500,
+      "verified": false,
+      "variants": [
+        { "id": "JAM60D42-505/LB", "wp": 505, "voc": 42.93, "vmp": 35.69, "isc": 15.01, "imp": 14.15, "available": true },
+        { "id": "JAM60D42-510/LB", "wp": 510, "voc": 43.13, "vmp": 35.92, "isc": 15.06, "imp": 14.20, "available": true },
+        { "id": "JAM60D42-515/LB", "wp": 515, "voc": 43.33, "vmp": 36.15, "isc": 15.11, "imp": 14.25, "available": true },
+        { "id": "JAM60D42-520/LB", "wp": 520, "voc": 43.53, "vmp": 36.37, "isc": 15.16, "imp": 14.30, "available": true },
+        { "id": "JAM60D42-525/LB", "wp": 525, "voc": 43.73, "vmp": 36.59, "isc": 15.21, "imp": 14.35, "available": true },
+        { "id": "JAM60D42-530/LB", "wp": 530, "voc": 43.93, "vmp": 36.81, "isc": 15.26, "imp": 14.40, "available": true }
+      ]
+    },
+    {
+      "family": "LONGi Hi-MO X10 LR7-60HVH",
+      "source": "LR7-60HVH",
+      "betaVoc": -0.2,
+      "vsysMax": 1500,
+      "verified": false,
+      "variants": [
+        { "id": "LR7-60HVH-535M", "wp": 535, "voc": 44.78, "vmp": 37.01, "isc": 15.15, "imp": 14.46, "available": true },
+        { "id": "LR7-60HVH-540M", "wp": 540, "voc": 44.88, "vmp": 37.11, "isc": 15.25, "imp": 14.55, "available": true },
+        { "id": "LR7-60HVH-545M", "wp": 545, "voc": 44.98, "vmp": 37.21, "isc": 15.35, "imp": 14.65, "available": true },
+        { "id": "LR7-60HVH-550M", "wp": 550, "voc": 45.08, "vmp": 37.31, "isc": 15.45, "imp": 14.74, "available": true },
+        { "id": "LR7-60HVH-555M", "wp": 555, "voc": 45.18, "vmp": 37.41, "isc": 15.55, "imp": 14.84, "available": true },
+        { "id": "LR7-60HVH-560M", "wp": 560, "voc": 45.28, "vmp": 37.51, "isc": 15.65, "imp": 14.93, "available": true }
+      ]
+    },
+    {
+      "family": "Solarge SOLO Ultra Low Carbon",
+      "source": "ultra-low-carbon-solarge",
+      "betaVoc": -0.24,
+      "vsysMax": 1500,
+      "verified": false,
+      "variants": [
+        { "id": "SOLO-470", "wp": 470, "voc": 49.8, "vmp": 39.4, "isc": 12.73, "imp": 11.99, "available": true },
+        { "id": "SOLO-480", "wp": 480, "voc": 49.8, "vmp": 39.7, "isc": 12.86, "imp": 12.15, "available": true },
+        { "id": "SOLO-490", "wp": 490, "voc": 49.9, "vmp": 40.0, "isc": 13.00, "imp": 12.31, "available": true },
+        { "id": "SOLO-500", "wp": 500, "voc": 49.9, "vmp": 40.3, "isc": 13.13, "imp": 12.47, "available": true },
+        { "id": "SOLO-510", "wp": 510, "voc": 49.9, "vmp": 40.6, "isc": 13.27, "imp": 12.63, "available": true },
+        { "id": "SOLO-520", "wp": 520, "voc": 49.9, "vmp": 40.8, "isc": 13.40, "imp": 12.79, "available": true }
+      ]
+    },
+    {
+      "family": "E.ON Aura JN440BB",
+      "source": "E_ON_Aura_440",
+      "betaVoc": -0.25,
+      "vsysMax": 1500,
+      "verified": false,
+      "variants": [
+        { "id": "JN440BB-54G3", "wp": 440, "voc": 38.90, "vmp": 32.47, "isc": 14.31, "imp": 13.55, "available": true }
+      ]
+    }
+  ]
+}
