@@ -5,8 +5,6 @@ import {
   getConnection,
   minFuse,
   inverterFitsConnection,
-  checkConfig,
-  allPass,
   findMatchingInverters,
   autoAssign,
   checkLegplanMulti,
@@ -44,6 +42,15 @@ function fmtCheckLimit(c) {
   return `${op} ${c.limit.toFixed(decimals)}${c.unit ? " " + c.unit : ""}`;
 }
 
+// Herbouwt de per-MPPT/string-grid van "Configuratie checken" bij het wisselen
+// van omvormer: behoudt bestaande waarden waar de slot nog bestaat, vult
+// nieuwe slots met een startwaarde, laat overtollige slots vervallen.
+function resizeCheckStrings(prev, inv) {
+  return Array.from({ length: inv.nMppt }, (_, mIdx) =>
+    Array.from({ length: inv.stringsPerMppt }, (_, sIdx) => (prev[mIdx] && prev[mIdx][sIdx]) || { n: 25, azimuth: 180, helling: 35 })
+  );
+}
+
 export default function PVConfigurator() {
   const [panelDb, setPanelDb] = useState(() => getPanelFamilies());
   const [inverterDb, setInverterDb] = useState(() => getInverterFamilies());
@@ -58,8 +65,11 @@ export default function PVConfigurator() {
   // check-mode selecties
   const [selPanelId, setSelPanelId] = useState("JAM54D41-430/GB");
   const [selInvId, setSelInvId] = useState("SUN2000-20K-MB0");
-  const [nPerString, setNPerString] = useState(25);
-  const [stringsPerMppt, setStringsPerMppt] = useState(1);
+  // Per-MPPT/string grid: checkStrings[mpptIndex][stringIndex] = { n, azimuth, helling }.
+  // n = 0 betekent: slot ongebruikt (minder strings dan de omvormer maximaal aankan).
+  const [checkStrings, setCheckStrings] = useState(() =>
+    resizeCheckStrings([], { nMppt: 2, stringsPerMppt: 2 })
+  );
 
   // find-mode
   const [findPanelId, setFindPanelId] = useState("JAM54D41-430/GB");
@@ -89,12 +99,26 @@ export default function PVConfigurator() {
   const selPanel = availPanels.find((p) => p.id === selPanelId) || availPanels[0];
   const selInv = availInverters.find((i) => i.id === selInvId) || availInverters[0];
 
-  const checks = useMemo(() => {
-    if (!selPanel || !selInv) return [];
-    return checkConfig({ panel: selPanel, inverter: selInv, nPerString, stringsPerMppt, tMinCold, tMaxHot });
-  }, [selPanel, selInv, nPerString, stringsPerMppt, tMinCold, tMaxHot]);
+  // Platte strings-lijst + vaste MPPT-toewijzing uit de grid (lege slots, n=0,
+  // tellen niet mee — checkLegplan is generiek over elke assignment-vorm).
+  const checkFlat = useMemo(() => {
+    const flatStrings = [];
+    const mppts = checkStrings.map((mpptStrings) =>
+      mpptStrings.reduce((idxs, s) => {
+        if (s.n > 0) {
+          idxs.push(flatStrings.length);
+          flatStrings.push({ ...s, panel: selPanel });
+        }
+        return idxs;
+      }, [])
+    );
+    return { flatStrings, assignment: { mppts, overflow: false } };
+  }, [checkStrings, selPanel]);
 
-  const passing = checks.length > 0 && allPass(checks);
+  const checkResult = useMemo(() => {
+    if (!selInv || !selPanel) return null;
+    return checkLegplan(checkFlat.flatStrings, selInv, checkFlat.assignment, tMinCold, tMaxHot);
+  }, [selInv, selPanel, checkFlat, tMinCold, tMaxHot]);
 
   const findPanel = availPanels.find((p) => p.id === findPanelId) || availPanels[0];
   const matches = useMemo(() => {
@@ -145,6 +169,12 @@ export default function PVConfigurator() {
         return Math.abs(a.m.dcAcRatio - 1.35) - Math.abs(b.m.dcAcRatio - 1.35);
       });
   }, [mode, availInverters, legStringsResolved, tMinCold, tMaxHot]);
+
+  function updateCheckString(mIdx, sIdx, field, value) {
+    setCheckStrings((prev) =>
+      prev.map((mpptStrings, mi) => (mi !== mIdx ? mpptStrings : mpptStrings.map((s, si) => (si !== sIdx ? s : { ...s, [field]: value }))))
+    );
+  }
 
   function updateLegString(idx, field, value) {
     setLegStrings((prev) => prev.map((s, i) => (i === idx ? { ...s, [field]: value } : s)));
@@ -266,7 +296,15 @@ export default function PVConfigurator() {
             </div>
             <div style={card}>
               <div style={label}>Omvormer</div>
-              <select value={selInvId} onChange={(e) => setSelInvId(e.target.value)} style={{ width: "100%", marginBottom: 8 }}>
+              <select
+                value={selInvId}
+                onChange={(e) => {
+                  setSelInvId(e.target.value);
+                  const newInv = availInverters.find((i) => i.id === e.target.value);
+                  if (newInv) setCheckStrings((prev) => resizeCheckStrings(prev, newInv));
+                }}
+                style={{ width: "100%", marginBottom: 8 }}
+              >
                 {availInverters.map((i) => (
                   <option key={i.id} value={i.id}>{i.id}</option>
                 ))}
@@ -283,63 +321,103 @@ export default function PVConfigurator() {
             </div>
           </div>
 
-          <div style={{ ...card, marginBottom: 16, display: "flex", gap: 24, flexWrap: "wrap" }}>
-            <div>
-              <div style={label}>Panelen per string</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <input type="range" min={2} max={40} step={1} value={nPerString} onChange={(e) => setNPerString(+e.target.value)} style={{ width: 160 }} />
-                <span style={{ fontWeight: 500, minWidth: 28 }}>{nPerString}</span>
-              </div>
-            </div>
-            <div>
-              <div style={label}>Strings per MPPT (parallel)</div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <input type="range" min={1} max={4} step={1} value={stringsPerMppt} onChange={(e) => setStringsPerMppt(+e.target.value)} style={{ width: 120 }} />
-                <span style={{ fontWeight: 500, minWidth: 20 }}>{stringsPerMppt}</span>
-              </div>
+          <div style={{ ...card, marginBottom: 16, background: "var(--color-background-secondary)", border: "none" }}>
+            <div style={{ fontSize: 13 }}>
+              <i className="ti ti-photo" style={{ fontSize: 16, verticalAlign: -2, marginRight: 6 }} aria-hidden="true" />
+              Heb je een Sollit-stringplan als screenshot? Upload 'm in de chat, dan vul ik de strings hieronder voor je in. Of voer ze handmatig in.
             </div>
           </div>
 
-          <div
-            style={{
-              ...card,
-              marginBottom: 12,
-              borderLeft: `3px solid ${passing ? "var(--color-border-success)" : "var(--color-border-danger)"}`,
-              borderRadius: "var(--border-radius-md)",
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <i className={`ti ${passing ? "ti-check" : "ti-x"}`} style={{ fontSize: 20, color: passing ? "var(--color-text-success)" : "var(--color-text-danger)" }} aria-hidden="true" />
-              <span style={{ fontWeight: 500, fontSize: 16 }}>
-                {passing ? "Configuratie past binnen alle grenzen" : "Configuratie overschrijdt een of meer grenzen"}
-              </span>
-            </div>
+          <h3 style={{ fontSize: 16, fontWeight: 500, margin: "8px 0" }}>Strings per MPPT</h3>
+          <div style={{ display: "grid", gap: 10, marginBottom: 16 }}>
+            {checkStrings.map((mpptStrings, mIdx) => (
+              <div key={mIdx} style={{ ...card, padding: "12px 14px" }}>
+                <div style={{ fontWeight: 500, marginBottom: 8 }}>MPPT {mIdx + 1}</div>
+                <div style={{ display: "grid", gap: 6 }}>
+                  {mpptStrings.map((s, sIdx) => (
+                    <div key={sIdx} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 12, ...muted, minWidth: 54 }}>String {sIdx + 1}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ fontSize: 12, ...muted }}>Panelen</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={40}
+                          value={s.n}
+                          onChange={(e) => updateCheckString(mIdx, sIdx, "n", Math.max(0, +e.target.value || 0))}
+                          style={{ width: 56 }}
+                        />
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ fontSize: 12, ...muted }}>Az</span>
+                        <input type="number" min={0} max={359} value={s.azimuth} onChange={(e) => updateCheckString(mIdx, sIdx, "azimuth", +e.target.value)} style={{ width: 60 }} />°
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ fontSize: 12, ...muted }}>Hel</span>
+                        <input type="number" min={0} max={90} value={s.helling} onChange={(e) => updateCheckString(mIdx, sIdx, "helling", +e.target.value)} style={{ width: 50 }} />°
+                      </div>
+                      {s.n === 0 && <span style={{ fontSize: 11, ...muted }}>(ongebruikt)</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
 
-          <div style={{ ...card }}>
-            <table style={{ width: "100%", fontSize: 13, borderCollapse: "collapse" }}>
-              <thead>
-                <tr style={{ textAlign: "left", ...muted }}>
-                  <th style={{ padding: "6px 0" }}>Check</th>
-                  <th style={{ padding: "6px 0" }}>Waarde</th>
-                  <th style={{ padding: "6px 0" }}>Limiet</th>
-                  <th style={{ padding: "6px 0", textAlign: "right" }}>Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {checks.map((c, i) => (
-                  <tr key={i} style={{ borderTop: "0.5px solid var(--color-border-tertiary)" }}>
-                    <td style={{ padding: "8px 0" }}>{c.label}</td>
-                    <td style={{ padding: "8px 0", fontWeight: 500 }}>{fmtCheckValue(c)}</td>
-                    <td style={{ padding: "8px 0", ...muted }}>{fmtCheckLimit(c)}</td>
-                    <td style={{ padding: "8px 0", textAlign: "right" }}>
-                      <i className={`ti ${c.pass ? "ti-check" : "ti-x"}`} style={{ color: c.pass ? "var(--color-text-success)" : "var(--color-text-danger)", fontSize: 16 }} aria-label={c.pass ? "ok" : "overschrijding"} />
-                    </td>
-                  </tr>
+          {checkResult && (
+            <>
+              <div
+                style={{
+                  ...card,
+                  marginBottom: 12,
+                  borderLeft: `3px solid ${checkResult.pass ? "var(--color-border-success)" : "var(--color-border-danger)"}`,
+                  borderRadius: "var(--border-radius-md)",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <i className={`ti ${checkResult.pass ? "ti-check" : "ti-x"}`} style={{ fontSize: 20, color: checkResult.pass ? "var(--color-text-success)" : "var(--color-text-danger)" }} aria-hidden="true" />
+                  <span style={{ fontWeight: 500, fontSize: 16 }}>
+                    {checkResult.pass ? "Configuratie past binnen alle grenzen" : "Configuratie overschrijdt een of meer grenzen"}
+                  </span>
+                </div>
+                <div style={{ fontSize: 13, ...muted, marginTop: 6 }}>
+                  {(checkResult.totalWp / 1000).toFixed(2)} kWp · {checkFlat.flatStrings.reduce((sum, x) => sum + x.n, 0)} panelen
+                  {checkResult.anyMixed && <span style={{ color: "var(--color-text-warning)" }}> · let op: gemengde oriëntatie op ≥1 MPPT — optimizers nodig</span>}
+                  {!checkResult.powerOk && <span style={{ color: "var(--color-text-danger)" }}> · DC-vermogen boven omvormerlimiet</span>}
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gap: 10 }}>
+                {checkResult.mpptResults.map((m) => (
+                  <div key={m.mpptNum} style={{ ...card, padding: "12px 14px" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6 }}>
+                      <span style={{ fontWeight: 500 }}>
+                        MPPT {m.mpptNum + 1}
+                        {m.empty ? <span style={{ ...muted, fontWeight: 400 }}> — leeg</span> : null}
+                        {m.mixed && <span style={{ background: "var(--color-background-warning)", color: "var(--color-text-warning)", fontSize: 11, padding: "2px 8px", borderRadius: "var(--border-radius-md)", marginLeft: 8 }}>gemengd</span>}
+                      </span>
+                      {!m.empty && <i className={`ti ${m.pass ? "ti-check" : "ti-x"}`} style={{ color: m.pass ? "var(--color-text-success)" : "var(--color-text-danger)", fontSize: 18 }} aria-hidden="true" />}
+                    </div>
+                    {!m.empty && (
+                      <>
+                        <div style={{ fontSize: 12, ...muted, margin: "4px 0 8px" }}>
+                          {m.strings.map((s, k) => `${s.n}× ${s.panel.wp}Wp @ ${s.azimuth}°`).join("  +  ")}
+                        </div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 16px" }}>
+                          {m.checks.map((c, k) => (
+                            <span key={k} style={{ fontSize: 12, display: "inline-flex", alignItems: "center", gap: 4, color: c.pass ? "var(--color-text-secondary)" : "var(--color-text-danger)" }}>
+                              <i className={`ti ${c.pass ? "ti-check" : "ti-x"}`} style={{ fontSize: 13 }} />
+                              {c.label}: {fmtCheckValue(c)} ({fmtCheckLimit(c)})
+                            </span>
+                          ))}
+                        </div>
+                      </>
+                    )}
+                  </div>
                 ))}
-              </tbody>
-            </table>
-          </div>
+              </div>
+            </>
+          )}
         </>
       )}
 

@@ -154,3 +154,22 @@ test("checkLegplan: gelijke oriëntatie op één MPPT past, gemengd wordt niet t
   const impCheck = mpptWithTwo.checks.find((c) => c.key === "imp");
   assert.ok(Math.abs(impCheck.value - 2 * JA430.imp) < 0.01, "Imp moet de som zijn van beide parallelle strings");
 });
+
+test("checkLegplan werkt ook met een handmatig opgebouwde (niet-autoAssign) toewijzing", () => {
+  // Configuratie checken bouwt de assignment direct op uit een vaste per-MPPT
+  // grid, in plaats van via autoAssign. checkLegplan moet daar net zo goed
+  // mee werken, want hij raakt alleen assignment.mppts/overflow aan.
+  const strings = [
+    { n: 23, panel: JA430, azimuth: 180 },
+    { n: 23, panel: JA430, azimuth: 180 },
+  ];
+  const assignment = { mppts: [[0, 1], []], overflow: false };
+  const result = checkLegplan(strings, SUN100, assignment, -10, 70);
+  assert.ok(result.pass, "2× 23-paneel strings op één MPPT moeten passen op SUN2000-100KTL-M2 (max 2/MPPT)");
+
+  const filledMppt = result.mpptResults.find((m) => m.mpptNum === 0);
+  assert.equal(filledMppt.strings.length, 2, "beide strings horen op MPPT 1 te staan");
+  const emptyMppt = result.mpptResults.find((m) => m.mpptNum === 1);
+  assert.equal(emptyMppt.empty, true, "MPPT 2 moet als leeg gemarkeerd worden");
+  assert.equal(emptyMppt.pass, true, "een lege MPPT faalt niet");
+});
