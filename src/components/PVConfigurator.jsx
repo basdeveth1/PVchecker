@@ -51,6 +51,32 @@ function resizeCheckStrings(prev, inv) {
   );
 }
 
+// Gedeeld wachtwoord voor /api/* — eenmalig gevraagd bij het eerste gebruik
+// van opslaan/laden, daarna onthouden in deze browser. Geen accounts, alleen
+// bescherming tegen misbruik van de publieke, niet-ingelogde link.
+const APP_KEY_STORAGE = "pvconfigurator_app_key";
+
+async function apiFetch(path, opts = {}) {
+  let key = localStorage.getItem(APP_KEY_STORAGE);
+  if (!key) {
+    key = window.prompt("Wachtwoord voor collega's (eenmalig, wordt onthouden in deze browser):") || "";
+    localStorage.setItem(APP_KEY_STORAGE, key);
+  }
+  const res = await fetch(path, {
+    ...opts,
+    headers: { ...(opts.headers || {}), "x-app-key": key, ...(opts.body ? { "Content-Type": "application/json" } : {}) },
+  });
+  if (res.status === 401) {
+    localStorage.removeItem(APP_KEY_STORAGE);
+    throw new Error("Wachtwoord onjuist — probeer opnieuw op te slaan/laden.");
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Serverfout (${res.status})`);
+  }
+  return res.json();
+}
+
 export default function PVConfigurator() {
   const [panelDb, setPanelDb] = useState(() => getPanelFamilies());
   const [inverterDb, setInverterDb] = useState(() => getInverterFamilies());
@@ -70,6 +96,13 @@ export default function PVConfigurator() {
   const [checkStrings, setCheckStrings] = useState(() =>
     resizeCheckStrings([], { nMppt: 2, stringsPerMppt: 2 })
   );
+
+  // Opslaan/laden van gedeelde configuraties (naam + Sollit-ID, verplicht)
+  const [savedConfigs, setSavedConfigs] = useState([]);
+  const [selectedLoadId, setSelectedLoadId] = useState("");
+  const [saveName, setSaveName] = useState("");
+  const [saveSollitId, setSaveSollitId] = useState("");
+  const [saveStatus, setSaveStatus] = useState(null); // { type: "ok" | "error", message }
 
   // find-mode
   const [findPanelId, setFindPanelId] = useState("JAM54D41-430/GB");
@@ -174,6 +207,52 @@ export default function PVConfigurator() {
     setCheckStrings((prev) =>
       prev.map((mpptStrings, mi) => (mi !== mIdx ? mpptStrings : mpptStrings.map((s, si) => (si !== sIdx ? s : { ...s, [field]: value }))))
     );
+  }
+
+  async function refreshSavedConfigs() {
+    try {
+      const data = await apiFetch("/api/configs");
+      setSavedConfigs(data.configs);
+    } catch (e) {
+      setSaveStatus({ type: "error", message: e.message });
+    }
+  }
+
+  async function saveCurrentConfig() {
+    if (!saveName.trim() || !saveSollitId.trim()) {
+      setSaveStatus({ type: "error", message: "Naam en Sollit ID zijn verplicht." });
+      return;
+    }
+    try {
+      const payload = { panelId: selPanelId, inverterId: selInvId, checkStrings, tMinCold, tMaxHot, connId };
+      await apiFetch("/api/configs", {
+        method: "POST",
+        body: JSON.stringify({ name: saveName.trim(), sollitId: saveSollitId.trim(), payload }),
+      });
+      setSaveStatus({ type: "ok", message: `Opgeslagen als "${saveName.trim()}".` });
+      setSaveName("");
+      setSaveSollitId("");
+      refreshSavedConfigs();
+    } catch (e) {
+      setSaveStatus({ type: "error", message: e.message });
+    }
+  }
+
+  async function loadSavedConfig(id) {
+    if (!id) return;
+    try {
+      const data = await apiFetch(`/api/configs/${id}`);
+      const p = data.config.payload;
+      setSelPanelId(p.panelId);
+      setSelInvId(p.inverterId);
+      setCheckStrings(p.checkStrings);
+      setTMinCold(p.tMinCold);
+      setTMaxHot(p.tMaxHot);
+      setConnId(p.connId);
+      setSaveStatus({ type: "ok", message: `"${data.config.name}" geladen.` });
+    } catch (e) {
+      setSaveStatus({ type: "error", message: e.message });
+    }
   }
 
   function updateLegString(idx, field, value) {
@@ -282,6 +361,52 @@ export default function PVConfigurator() {
       {/* CHECK MODE */}
       {mode === "check" && selPanel && selInv && (
         <>
+          <div style={{ ...card, marginBottom: 12, display: "flex", gap: 24, flexWrap: "wrap", justifyContent: "space-between", alignItems: "flex-end" }}>
+            <div>
+              <div style={label}>Laad opgeslagen configuratie</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <select
+                  value={selectedLoadId}
+                  onChange={(e) => { setSelectedLoadId(e.target.value); loadSavedConfig(e.target.value); }}
+                  style={{ width: 220 }}
+                >
+                  <option value="">— kies —</option>
+                  {savedConfigs.map((c) => (
+                    <option key={c.id} value={c.id}>{c.name} ({c.sollit_id})</option>
+                  ))}
+                </select>
+                <button
+                  onClick={refreshSavedConfigs}
+                  title="Vernieuw lijst"
+                  style={{ padding: "4px 10px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer" }}
+                >
+                  <i className="ti ti-refresh" style={{ fontSize: 15 }} />
+                </button>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+              <div>
+                <div style={label}>Naam</div>
+                <input type="text" value={saveName} onChange={(e) => setSaveName(e.target.value)} placeholder="bijv. Jansen — Dorpsstraat 12" style={{ width: 180 }} />
+              </div>
+              <div>
+                <div style={label}>Sollit ID</div>
+                <input type="text" value={saveSollitId} onChange={(e) => setSaveSollitId(e.target.value)} style={{ width: 100 }} />
+              </div>
+              <button
+                onClick={saveCurrentConfig}
+                style={{ padding: "6px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500 }}
+              >
+                Opslaan
+              </button>
+            </div>
+            {saveStatus && (
+              <div style={{ width: "100%", fontSize: 12, color: saveStatus.type === "error" ? "var(--color-text-danger)" : "var(--color-text-success)" }}>
+                {saveStatus.message}
+              </div>
+            )}
+          </div>
+
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 12, marginBottom: 16 }}>
             <div style={card}>
               <div style={label}>Paneel</div>
