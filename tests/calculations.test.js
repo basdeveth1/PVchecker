@@ -17,6 +17,7 @@ import {
   checkLegplanMulti,
   autoAssign,
   checkLegplan,
+  distributeCounts,
 } from "../src/core/calculations.js";
 
 // Referentiepaneel: JA Solar JAM54D41-430/GB
@@ -172,4 +173,19 @@ test("checkLegplan werkt ook met een handmatig opgebouwde (niet-autoAssign) toew
   const emptyMppt = result.mpptResults.find((m) => m.mpptNum === 1);
   assert.equal(emptyMppt.empty, true, "MPPT 2 moet als leeg gemarkeerd worden");
   assert.equal(emptyMppt.pass, true, "een lege MPPT faalt niet");
+});
+
+// Referentiecase: 1252-panelen-project (LONGi 540 Wp / GoodWe SDT-C30),
+// besproken 2026-07-17. distributeCounts moet dezelfde stringverdeling geven
+// als het handmatige ontwerp: 111 panelen over 6 strings → 19/19/19/18/18/18.
+test("distributeCounts: 111 panelen over 6 strings (Mevlana-omvormer)", () => {
+  assert.deepEqual(distributeCounts(111, 6), [19, 19, 19, 18, 18, 18]);
+});
+
+test("distributeCounts: 102 panelen over 6 strings (Ameco-omvormer, exact deelbaar)", () => {
+  assert.deepEqual(distributeCounts(102, 6), [17, 17, 17, 17, 17, 17]);
+});
+
+test("distributeCounts: 89 panelen over 6 strings (Emin Chicken-omvormer)", () => {
+  assert.deepEqual(distributeCounts(89, 6), [15, 15, 15, 15, 15, 14]);
 });

@@ -112,6 +112,16 @@ export function allPass(checks) {
   return checks.every((c) => c.pass);
 }
 
+// Verdeelt `total` zo gelijkmatig mogelijk over `parts` gehele delen
+// (verschil tussen grootste en kleinste deel ≤ 1), aflopend gesorteerd.
+// Bouwsteen voor elke vraag waarbij een totaal niet netjes deelbaar is
+// over strings/omvormers/partijen.
+export function distributeCounts(total, parts) {
+  const base = Math.floor(total / parts);
+  const remainder = total % parts;
+  return Array.from({ length: parts }, (_, i) => base + (i < remainder ? 1 : 0));
+}
+
 // ----------------------------------------------------------------------------
 // Omvormer zoeken (multi-omvormer, optimalisatie naar 120-150% band)
 // ----------------------------------------------------------------------------

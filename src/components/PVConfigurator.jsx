@@ -121,7 +121,7 @@ async function apiFetch(path, opts = {}) {
 export default function PVConfigurator() {
   const [panelDb, setPanelDb] = useState(() => getPanelFamilies());
   const [inverterDb, setInverterDb] = useState(() => getInverterFamilies());
-  const [mode, setMode] = useState("check"); // "check" | "find" | "legplan" | "library"
+  const [mode, setMode] = useState("check"); // "check" | "find" | "legplan" | "library" | "agent"
 
   const [tMinCold, setTMinCold] = useState(-10);
   const [tMaxHot, setTMaxHot] = useState(70);
@@ -165,6 +165,14 @@ export default function PVConfigurator() {
   const [agentInstruction, setAgentInstruction] = useState("");
   const [agentBusy, setAgentBusy] = useState(false);
   const [agentStatus, setAgentStatus] = useState(null); // { type, message }
+
+  // Vrije vraag/antwoord-agent (tabblad "Agent"): elk antwoord komt tot stand
+  // via tool-aanroepen naar de rekenkern, nooit door de agent zelf te laten
+  // rekenen. chatMessages: [{ role: "user"|"assistant", content, toolCalls? }]
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const [chatError, setChatError] = useState(null);
 
   // Componenten beheren: formulier voor nieuwe componenten
   const [addType, setAddType] = useState("panel"); // "panel" | "inverter"
@@ -408,6 +416,37 @@ export default function PVConfigurator() {
       setAgentStatus({ type: "error", message: e.message });
     } finally {
       setAgentBusy(false);
+    }
+  }
+
+  // Vrije vraag/antwoord: stuurt de hele gespreksgeschiedenis + de huidige
+  // component-lijsten (mét toggles/labels, zoals de gebruiker ze nu ziet)
+  // naar /api/agent-chat. De server rekent nooit zelf — elk getal in het
+  // antwoord komt uit een tool-aanroep naar de rekenkern (zie api/agent-chat.js).
+  async function sendChatMessage() {
+    if (!chatInput.trim() || chatBusy) return;
+    const userMessage = { role: "user", content: chatInput.trim() };
+    const nextMessages = [...chatMessages, userMessage];
+    setChatMessages(nextMessages);
+    setChatInput("");
+    setChatError(null);
+    setChatBusy(true);
+    try {
+      const data = await apiFetch("/api/agent-chat", {
+        method: "POST",
+        body: JSON.stringify({
+          messages: nextMessages.map((m) => ({ role: m.role, content: m.content })),
+          panels: availPanels,
+          inverters: availInverters,
+          tMinCold,
+          tMaxHot,
+        }),
+      });
+      setChatMessages((prev) => [...prev, { role: "assistant", content: data.reply, toolCalls: data.toolCalls }]);
+    } catch (e) {
+      setChatError(e.message);
+    } finally {
+      setChatBusy(false);
     }
   }
 
@@ -806,10 +845,11 @@ export default function PVConfigurator() {
         {tabBtn("find", "Omvormer zoeken")}
         {tabBtn("legplan", "Legplan-check")}
         {tabBtn("library", "Componenten beheren")}
+        {tabBtn("agent", "Agent")}
       </div>
 
       {/* Hoofdaansluiting + temperatuurinstellingen */}
-      {mode !== "library" && (
+      {mode !== "library" && mode !== "agent" && (
         <>
           <div style={{ ...card, marginBottom: 12, display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-end" }}>
             <div>
@@ -1594,6 +1634,85 @@ export default function PVConfigurator() {
               </div>
             )}
           </div>
+        </>
+      )}
+
+      {/* AGENT MODE */}
+      {mode === "agent" && (
+        <>
+          <div style={{ ...card, marginBottom: 12, background: "var(--color-background-secondary)", border: "none" }}>
+            <div style={{ fontSize: 13 }}>
+              Stel een vrije vraag over stringconfiguraties, omvormerkeuze of paneelverdeling — bijv. "welke omvormer past bij 76 panelen van 430Wp?" of
+              "verdeel 111 panelen over 6 strings". De agent rekent nooit zelf: elk getal in het antwoord komt uit een aanroep naar de rekenkern, zichtbaar
+              onder "Toon berekeningen" bij elk antwoord.
+            </div>
+          </div>
+
+          <div style={{ display: "grid", gap: 10, marginBottom: 12 }}>
+            {chatMessages.length === 0 && (
+              <div style={{ ...card, ...muted, fontSize: 13 }}>Nog geen vragen gesteld in dit gesprek.</div>
+            )}
+            {chatMessages.map((m, i) => (
+              <div
+                key={i}
+                style={{
+                  ...card,
+                  padding: "10px 14px",
+                  background: m.role === "user" ? "var(--color-background-secondary)" : "var(--color-background-primary)",
+                }}
+              >
+                <div style={{ fontSize: 11, fontWeight: 500, ...muted, marginBottom: 4 }}>{m.role === "user" ? "Jij" : "Agent"}</div>
+                <div style={{ fontSize: 13, whiteSpace: "pre-wrap" }}>{m.content}</div>
+                {m.toolCalls?.length > 0 && (
+                  <details style={{ marginTop: 8 }}>
+                    <summary style={{ fontSize: 11, ...muted, cursor: "pointer" }}>Toon berekeningen ({m.toolCalls.length})</summary>
+                    <div style={{ display: "grid", gap: 6, marginTop: 6 }}>
+                      {m.toolCalls.map((tc, k) => (
+                        <div key={k} style={{ fontSize: 11, fontFamily: "monospace", background: "var(--color-background-secondary)", padding: "6px 8px", borderRadius: "var(--border-radius-md)", overflowX: "auto" }}>
+                          <div style={{ fontWeight: 500 }}>{tc.name}({JSON.stringify(tc.input)})</div>
+                          <div style={{ ...muted, marginTop: 2 }}>→ {JSON.stringify(tc.output)}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
+              </div>
+            ))}
+          </div>
+
+          {chatError && <div style={{ fontSize: 12, color: "var(--color-text-danger)", marginBottom: 12 }}>{chatError}</div>}
+
+          <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  sendChatMessage();
+                }
+              }}
+              placeholder="bijv. 'welke omvormer past bij 76 panelen van 430Wp?'"
+              style={{ flex: "1 1 auto" }}
+              disabled={chatBusy}
+            />
+            <button
+              onClick={sendChatMessage}
+              disabled={chatBusy || !chatInput.trim()}
+              style={{ padding: "6px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: chatBusy ? "default" : "pointer", fontWeight: 500, opacity: chatBusy || !chatInput.trim() ? 0.6 : 1 }}
+            >
+              {chatBusy ? "Bezig…" : "Versturen"}
+            </button>
+          </div>
+          {chatMessages.length > 0 && (
+            <button
+              onClick={() => { setChatMessages([]); setChatError(null); }}
+              style={{ fontSize: 12, padding: "4px 10px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-secondary)" }}
+            >
+              Nieuw gesprek
+            </button>
+          )}
         </>
       )}
 
