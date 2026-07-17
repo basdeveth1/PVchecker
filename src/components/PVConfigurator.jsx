@@ -95,6 +95,8 @@ function resizeCheckStrings(prev, inv) {
 // Gedeeld wachtwoord voor /api/* — eenmalig gevraagd bij het eerste gebruik
 // van opslaan/laden, daarna onthouden in deze browser. Geen accounts, alleen
 // bescherming tegen misbruik van de publieke, niet-ingelogde link.
+// Wordt nu al bij het openen van de pagina gevraagd via de login-gate
+// hieronder, in plaats van pas bij de eerste opslaan/laden-actie.
 const APP_KEY_STORAGE = "pvconfigurator_app_key";
 
 async function apiFetch(path, opts = {}) {
@@ -119,6 +121,52 @@ async function apiFetch(path, opts = {}) {
 }
 
 export default function PVConfigurator() {
+  // Login-gate: het wachtwoord wordt nu al bij het openen van de pagina
+  // gevraagd, vóór de rest van de tool zichtbaar wordt — niet pas bij de
+  // eerste opslaan/laden-actie zoals voorheen.
+  const [checkingKey, setCheckingKey] = useState(true);
+  const [unlocked, setUnlocked] = useState(false);
+  const [loginInput, setLoginInput] = useState("");
+  const [loginError, setLoginError] = useState(null);
+  const [loginBusy, setLoginBusy] = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      const stored = localStorage.getItem(APP_KEY_STORAGE);
+      if (!stored) {
+        setCheckingKey(false);
+        return;
+      }
+      try {
+        const res = await fetch("/api/verify-key", { headers: { "x-app-key": stored } });
+        if (res.ok) setUnlocked(true);
+        else localStorage.removeItem(APP_KEY_STORAGE);
+      } catch {
+        // netwerkfout: laat het opgeslagen wachtwoord staan, gate toont het formulier
+      }
+      setCheckingKey(false);
+    })();
+  }, []);
+
+  async function handleLogin() {
+    if (!loginInput.trim() || loginBusy) return;
+    setLoginBusy(true);
+    setLoginError(null);
+    try {
+      const res = await fetch("/api/verify-key", { headers: { "x-app-key": loginInput } });
+      if (res.ok) {
+        localStorage.setItem(APP_KEY_STORAGE, loginInput);
+        setUnlocked(true);
+      } else {
+        setLoginError("Wachtwoord onjuist.");
+      }
+    } catch {
+      setLoginError("Kon niet verbinden met de server. Probeer het opnieuw.");
+    } finally {
+      setLoginBusy(false);
+    }
+  }
+
   const [panelDb, setPanelDb] = useState(() => getPanelFamilies());
   const [inverterDb, setInverterDb] = useState(() => getInverterFamilies());
   const [mode, setMode] = useState("check"); // "check" | "find" | "legplan" | "library" | "agent"
@@ -834,6 +882,49 @@ export default function PVConfigurator() {
             </div>
           </div>
         )}
+      </div>
+    );
+  }
+
+  if (checkingKey) {
+    return (
+      <div style={{ fontFamily: "var(--font-sans)", color: "var(--color-text-secondary)", padding: "2rem 0", textAlign: "center" }}>
+        Laden…
+      </div>
+    );
+  }
+
+  if (!unlocked) {
+    return (
+      <div style={{ fontFamily: "var(--font-sans)", color: "var(--color-text-primary)", maxWidth: 360, margin: "10vh auto 0", padding: "0 1rem" }}>
+        <div style={card}>
+          <h2 style={{ fontSize: 18, fontWeight: 500, margin: "0 0 6px" }}>PV Configurator</h2>
+          <p style={{ fontSize: 13, ...muted, marginTop: 0, marginBottom: 16 }}>
+            Voer het wachtwoord voor collega's in om de tool te gebruiken.
+          </p>
+          <input
+            type="password"
+            value={loginInput}
+            onChange={(e) => setLoginInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") handleLogin();
+            }}
+            placeholder="Wachtwoord"
+            autoFocus
+            disabled={loginBusy}
+            style={{ width: "100%", marginBottom: 10 }}
+          />
+          <button
+            onClick={handleLogin}
+            disabled={loginBusy || !loginInput.trim()}
+            style={{ width: "100%", padding: "8px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: loginBusy ? "default" : "pointer", fontWeight: 500, opacity: loginBusy || !loginInput.trim() ? 0.6 : 1 }}
+          >
+            {loginBusy ? "Bezig…" : "Inloggen"}
+          </button>
+          {loginError && (
+            <div style={{ fontSize: 12, color: "var(--color-text-danger)", marginTop: 8 }}>{loginError}</div>
+          )}
+        </div>
       </div>
     );
   }
