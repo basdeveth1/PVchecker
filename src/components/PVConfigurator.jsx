@@ -1,5 +1,5 @@
-import React, { useState, useMemo } from "react";
-import { getPanelFamilies, getInverterFamilies, flattenPanels, flattenInverters } from "../data/loader.js";
+import React, { useState, useMemo, useEffect, useRef } from "react";
+import { getPanelFamilies, getInverterFamilies, flattenPanels, flattenInverters, mergeCustomComponents, applyLabels } from "../data/loader.js";
 import {
   CONNECTIONS,
   getConnection,
@@ -40,6 +40,47 @@ function fmtCheckLimit(c) {
   const decimals = c.unit === "V" ? 0 : c.unit === "A" ? 1 : 0;
   const op = CHECK_OPS[c.key] || "≤";
   return `${op} ${c.limit.toFixed(decimals)}${c.unit ? " " + c.unit : ""}`;
+}
+
+// Variant-velden voor het "component toevoegen"-formulier — zelfde velden
+// als in src/data/panels.json / inverters.json, zodat api/components.js
+// zonder verdere aanpassing kan valideren en mergen.
+const PANEL_VARIANT_FIELDS = [
+  { key: "id", label: "Type-aanduiding" },
+  { key: "wp", label: "Wp" },
+  { key: "voc", label: "Voc (V)", step: "0.01" },
+  { key: "vmp", label: "Vmp (V)", step: "0.01" },
+  { key: "isc", label: "Isc (A)", step: "0.01" },
+  { key: "imp", label: "Imp (A)", step: "0.01" },
+];
+const INVERTER_VARIANT_FIELDS = [
+  { key: "id", label: "Type-aanduiding" },
+  { key: "pmax", label: "Pmax DC (W)" },
+  { key: "vmax", label: "Vmax (V)" },
+  { key: "vmpptMin", label: "MPPT min (V)" },
+  { key: "vmpptMax", label: "MPPT max (V)" },
+  { key: "imppt", label: "I MPPT (A)", step: "0.1" },
+  { key: "isc", label: "Isc (A)", step: "0.1" },
+  { key: "nMppt", label: "# MPPT" },
+  { key: "stringsPerMppt", label: "Strings/MPPT" },
+  { key: "pacNom", label: "Pac nom (W)" },
+  { key: "iacMax", label: "Iac max (A)", step: "0.1" },
+];
+
+// Zoekt bij een uit een screenshot geëxtraheerde string ({ wp, fabrikant })
+// de bijpassende database-variant. Eén match → gebruiken; 0 of >1 → aan de
+// gebruiker laten kiezen (zie docs/sollit-import.md, "geen aannames").
+function matchExtractedPanel(extracted, availPanels) {
+  if (!extracted.wp) return null;
+  const candidates = availPanels.filter((p) => {
+    const wpOk = Math.abs(p.wp - extracted.wp) <= 2;
+    if (!wpOk) return false;
+    if (!extracted.fabrikant) return true;
+    const fam = p.family.toLowerCase();
+    const fab = String(extracted.fabrikant).toLowerCase();
+    return fam.includes(fab) || fab.includes(fam.split(" ")[0]);
+  });
+  return candidates.length === 1 ? candidates[0].id : null;
 }
 
 // Herbouwt de per-MPPT/string-grid van "Configuratie checken" bij het wisselen
@@ -118,6 +159,29 @@ export default function PVConfigurator() {
   const [legInvId, setLegInvId] = useState("SUN2000-20K-MB0");
   const [legAssignMode, setLegAssignMode] = useState("auto"); // "auto" | "manual"
   const [manualAssign, setManualAssign] = useState(null); // [[idx,...], ...] per MPPT
+
+  // Componenten beheren: formulier voor nieuwe componenten
+  const [addType, setAddType] = useState("panel"); // "panel" | "inverter"
+  const [addFamilyMode, setAddFamilyMode] = useState("existing"); // "existing" | "new"
+  const [addFamilyName, setAddFamilyName] = useState("");
+  const [addBetaVoc, setAddBetaVoc] = useState("");
+  const [addVsysMax, setAddVsysMax] = useState("");
+  const [addNote, setAddNote] = useState("");
+  const [addVariant, setAddVariant] = useState({});
+  const [addStatus, setAddStatus] = useState(null);
+  const customFetchStarted = useRef(false);
+
+  // Datasheet-upload: extractie ter bevestiging, nooit direct toegepast (zie
+  // CLAUDE.md: datasheet-extractie is het grootste risico van deze tool).
+  const [datasheetBusy, setDatasheetBusy] = useState(false);
+  const [datasheetError, setDatasheetError] = useState(null);
+  const [datasheetDraft, setDatasheetDraft] = useState(null); // { familyName, isNewFamily, betaVoc, vsysMax, note, rows: [...] }
+
+  // Screenshot-import: geëxtraheerde strings ter bevestiging, per tab apart
+  // (check-mode en legplan-mode hebben een verschillend doel-datamodel).
+  const [importBusy, setImportBusy] = useState(false);
+  const [importError, setImportError] = useState(null);
+  const [importDraft, setImportDraft] = useState(null); // { target: "check"|"legplan", rows: [...] }
 
   const availPanels = useMemo(() => flattenPanels(panelDb), [panelDb]);
   const conn = useMemo(() => getConnection(connId), [connId]);
@@ -296,6 +360,284 @@ export default function PVConfigurator() {
     );
   }
 
+  // Haalt door collega's toegevoegde componenten op en mixt ze door de
+  // lokale families-state. Ref-guard i.p.v. een geladen-vlag: voorkomt een
+  // dubbele fetch als zowel de mount-effect (wachtwoord al bekend) als de
+  // library-tab-effect vrijwel gelijktijdig zouden vuren.
+  async function fetchCustomComponents() {
+    if (customFetchStarted.current) return;
+    customFetchStarted.current = true;
+    try {
+      const [componentsData, labelsData] = await Promise.all([apiFetch("/api/components"), apiFetch("/api/labels")]);
+      setPanelDb((prev) => applyLabels(mergeCustomComponents(prev, componentsData.components, "panel"), labelsData.labels, "panel"));
+      setInverterDb((prev) => applyLabels(mergeCustomComponents(prev, componentsData.components, "inverter"), labelsData.labels, "inverter"));
+    } catch (e) {
+      customFetchStarted.current = false; // opnieuw proberen toestaan (bijv. na fout wachtwoord)
+      setAddStatus({ type: "error", message: e.message });
+    }
+  }
+
+  // Label bewerken/verwijderen op een variant — geldt ongeacht of die variant
+  // uit de statische database of via "component toevoegen" komt.
+  async function editLabel(type, variantId, currentLabel) {
+    const value = window.prompt(`Label voor ${variantId} (leeg = verwijderen):`, currentLabel || "");
+    if (value === null) return;
+    const label = value.trim();
+    try {
+      await apiFetch("/api/labels", { method: "POST", body: JSON.stringify({ type, variantId, label }) });
+      const setter = type === "panel" ? setPanelDb : setInverterDb;
+      setter((prev) =>
+        prev.map((f) => ({
+          ...f,
+          variants: f.variants.map((v) => (v.id !== variantId ? v : label ? { ...v, label } : { ...v, label: undefined })),
+        }))
+      );
+    } catch (e) {
+      setAddStatus({ type: "error", message: e.message });
+    }
+  }
+
+  useEffect(() => {
+    // Alleen automatisch laden als het wachtwoord al bekend is — anders niet
+    // meteen bij opstarten om een prompt vragen, zoals ook opgeslagen
+    // configuraties pas laden na een expliciete actie.
+    if (localStorage.getItem(APP_KEY_STORAGE)) fetchCustomComponents();
+  }, []);
+
+  useEffect(() => {
+    if (mode === "library") fetchCustomComponents();
+  }, [mode]);
+
+  // Gedeeld door het handmatige formulier en de datasheet-bevestigingstabel:
+  // POST + lokaal mergen. Eén variant per aanroep, meerdere varianten uit
+  // één datasheet worden er dus na elkaar doorheen geloopt.
+  async function postComponent({ type, familyName, isNewFamily, familyMeta, variant }) {
+    const data = await apiFetch("/api/components", {
+      method: "POST",
+      body: JSON.stringify({ type, familyName, isNewFamily, familyMeta, variant }),
+    });
+    const setter = type === "panel" ? setPanelDb : setInverterDb;
+    setter((prev) => mergeCustomComponents(prev, [data.component], type));
+    return data.component;
+  }
+
+  async function submitAddComponent() {
+    if (!addFamilyName.trim()) {
+      setAddStatus({ type: "error", message: "Kies of vul een familienaam in." });
+      return;
+    }
+    const fields = addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS;
+    const variant = {};
+    for (const f of fields) {
+      const raw = addVariant[f.key];
+      if (raw === undefined || raw === "") {
+        setAddStatus({ type: "error", message: `Veld "${f.label}" is verplicht.` });
+        return;
+      }
+      variant[f.key] = f.key === "id" ? raw : Number(raw);
+    }
+    const isNewFamily = addFamilyMode === "new";
+    if (isNewFamily && addType === "panel" && (addBetaVoc === "" || addVsysMax === "")) {
+      setAddStatus({ type: "error", message: "Nieuwe panelfamilie vereist β Voc en Vsys max." });
+      return;
+    }
+    const familyMeta = isNewFamily
+      ? addType === "panel"
+        ? { betaVoc: Number(addBetaVoc), vsysMax: Number(addVsysMax), ...(addNote.trim() ? { note: addNote.trim() } : {}) }
+        : { ...(addNote.trim() ? { note: addNote.trim() } : {}) }
+      : null;
+
+    try {
+      await postComponent({ type: addType, familyName: addFamilyName.trim(), isNewFamily, familyMeta, variant });
+      setAddStatus({ type: "ok", message: `Toegevoegd — nog niet gecontroleerd tegen de datasheet.` });
+      setAddVariant({});
+      if (isNewFamily) {
+        setAddFamilyName("");
+        setAddBetaVoc("");
+        setAddVsysMax("");
+        setAddNote("");
+      }
+    } catch (e) {
+      setAddStatus({ type: "error", message: e.message });
+    }
+  }
+
+  // Datasheet → base64 → /api/parse-datasheet → bevestigingstabel met (vaak
+  // meerdere) variant-rijen. Niets wordt toegevoegd zonder expliciete
+  // "Geselecteerde toevoegen"-klik — datasheet-extractie is het grootste
+  // risico van deze tool (zie CLAUDE.md), dus geen automatische verified:true.
+  async function handleDatasheetUpload(file) {
+    setDatasheetError(null);
+    setDatasheetBusy(true);
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const [, mediaType, base64] = dataUrl.match(/^data:(.+);base64,(.*)$/) || [];
+      if (!base64) throw new Error("Kon het bestand niet lezen.");
+      const data = await apiFetch("/api/parse-datasheet", {
+        method: "POST",
+        body: JSON.stringify({ fileBase64: base64, mediaType, type: addType }),
+      });
+      const dbList = addType === "panel" ? panelDb : inverterDb;
+      const existing = dbList.find((f) => f.family.toLowerCase() === String(data.familyName || "").toLowerCase());
+      const fields = addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS;
+      const rows = data.variants.map((v) => {
+        const row = { include: true, iacMaxComputed: addType === "inverter" && !!v.iacMaxComputed };
+        for (const f of fields) row[f.key] = v[f.key] ?? "";
+        return row;
+      });
+      setDatasheetDraft({
+        familyName: existing ? existing.family : data.familyName || "",
+        isNewFamily: !existing,
+        betaVoc: addType === "panel" ? data.betaVoc ?? "" : "",
+        vsysMax: addType === "panel" ? data.vsysMax ?? "" : "",
+        note: "",
+        rows,
+      });
+    } catch (e) {
+      setDatasheetError(e.message);
+    } finally {
+      setDatasheetBusy(false);
+    }
+  }
+
+  function updateDatasheetMeta(field, value) {
+    setDatasheetDraft((prev) => ({ ...prev, [field]: value }));
+  }
+  function updateDatasheetRow(idx, field, value) {
+    setDatasheetDraft((prev) => ({ ...prev, rows: prev.rows.map((r, i) => (i !== idx ? r : { ...r, [field]: value })) }));
+  }
+  function toggleDatasheetRow(idx) {
+    setDatasheetDraft((prev) => ({ ...prev, rows: prev.rows.map((r, i) => (i !== idx ? r : { ...r, include: !r.include })) }));
+  }
+
+  async function applyDatasheetDraft() {
+    const draft = datasheetDraft;
+    if (!draft.familyName.trim()) {
+      setDatasheetError("Familienaam is verplicht.");
+      return;
+    }
+    const fields = addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS;
+    if (draft.isNewFamily && addType === "panel" && (draft.betaVoc === "" || draft.vsysMax === "")) {
+      setDatasheetError("Nieuwe panelfamilie vereist β Voc en Vsys max.");
+      return;
+    }
+    const familyMeta = draft.isNewFamily
+      ? addType === "panel"
+        ? { betaVoc: Number(draft.betaVoc), vsysMax: Number(draft.vsysMax), ...(draft.note.trim() ? { note: draft.note.trim() } : {}) }
+        : { ...(draft.note.trim() ? { note: draft.note.trim() } : {}) }
+      : null;
+
+    const included = draft.rows.filter((r) => r.include);
+    if (included.length === 0) {
+      setDatasheetError("Selecteer minstens één variant om toe te voegen.");
+      return;
+    }
+    let added = 0;
+    let skipped = 0;
+    for (const r of included) {
+      const variant = {};
+      let rowOk = true;
+      for (const f of fields) {
+        if (r[f.key] === undefined || r[f.key] === "") {
+          rowOk = false;
+          break;
+        }
+        variant[f.key] = f.key === "id" ? r[f.key] : Number(r[f.key]);
+      }
+      if (!rowOk) {
+        skipped++;
+        continue; // onvolledig gelezen — niet gokken, gebruiker moet aanvullen en opnieuw proberen
+      }
+      try {
+        await postComponent({ type: addType, familyName: draft.familyName.trim(), isNewFamily: draft.isNewFamily, familyMeta, variant });
+        added++;
+      } catch (e) {
+        setDatasheetError(`${e.message} (${added} van ${included.length} al toegevoegd vóór deze fout)`);
+        return;
+      }
+    }
+    setAddStatus({
+      type: "ok",
+      message: `${added} variant(en) toegevoegd uit datasheet — nog niet gecontroleerd.${skipped ? ` ${skipped} overgeslagen wegens onvolledige gegevens.` : ""}`,
+    });
+    setDatasheetDraft(null);
+    setDatasheetError(null);
+  }
+
+  // Screenshot → base64 → /api/parse-stringplan → matching → bevestigingsdraft.
+  // Niets wordt toegepast zonder expliciete "Toepassen"-klik (zie
+  // docs/sollit-import.md: OCR/vision kan een cijfer verkeerd lezen).
+  async function handleStringplanUpload(file, target) {
+    setImportError(null);
+    setImportBusy(true);
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const [, mediaType, base64] = dataUrl.match(/^data:(.+);base64,(.*)$/) || [];
+      if (!base64) throw new Error("Kon het bestand niet lezen.");
+      const data = await apiFetch("/api/parse-stringplan", {
+        method: "POST",
+        body: JSON.stringify({ imageBase64: base64, mediaType }),
+      });
+      const rows = data.strings.map((s) => ({
+        n: s.n ?? 1,
+        azimuth: s.azimuth ?? 180,
+        helling: s.helling ?? 35,
+        panelId: matchExtractedPanel(s, availPanels) || availPanels[0].id,
+        extractedWp: s.wp,
+        extractedFabrikant: s.fabrikant,
+      }));
+      setImportDraft({ target, rows });
+    } catch (e) {
+      setImportError(e.message);
+    } finally {
+      setImportBusy(false);
+    }
+  }
+
+  function updateImportRow(idx, field, value) {
+    setImportDraft((prev) => ({ ...prev, rows: prev.rows.map((r, i) => (i !== idx ? r : { ...r, [field]: value })) }));
+  }
+  function removeImportRow(idx) {
+    setImportDraft((prev) => ({ ...prev, rows: prev.rows.filter((_, i) => i !== idx) }));
+  }
+
+  function applyImportDraft() {
+    if (!importDraft) return;
+    const rows = importDraft.rows;
+    if (importDraft.target === "legplan") {
+      setLegStrings(rows.map((r) => ({ n: r.n, panelId: r.panelId, azimuth: r.azimuth, helling: r.helling })));
+      setManualAssign(null);
+    } else {
+      const resolved = rows.map((r) => ({ ...r, panel: availPanels.find((p) => p.id === r.panelId) || availPanels[0] }));
+      const assignment = autoAssign(resolved, selInv);
+      if (assignment.overflow) {
+        setImportError(
+          `${rows.length} strings passen niet op de ${selInv.nMppt} MPPT × ${selInv.stringsPerMppt} van ${selInv.id}. Gebruik Legplan-check voor grotere systemen, of pas de omvormer aan.`
+        );
+        return;
+      }
+      const grid = Array.from({ length: selInv.nMppt }, (_, mIdx) =>
+        Array.from({ length: selInv.stringsPerMppt }, (_, sIdx) => {
+          const stringIdx = assignment.mppts[mIdx]?.[sIdx];
+          return stringIdx !== undefined ? { n: rows[stringIdx].n, azimuth: rows[stringIdx].azimuth, helling: rows[stringIdx].helling } : { n: 0, azimuth: 180, helling: 35 };
+        })
+      );
+      setCheckStrings(grid);
+    }
+    setImportDraft(null);
+    setImportError(null);
+  }
+
   const tabBtn = (id, text) => (
     <button
       onClick={() => setMode(id)}
@@ -312,6 +654,84 @@ export default function PVConfigurator() {
       {text}
     </button>
   );
+
+  // Screenshot-upload + bevestigingstabel, gedeeld tussen "Configuratie
+  // checken" en "Legplan-check" (die verschillen alleen in wat er met
+  // applyImportDraft() gebeurt na bevestigen).
+  function renderStringplanImport(target) {
+    const draftActive = importDraft && importDraft.target === target;
+    return (
+      <div style={{ ...card, marginBottom: 16, background: "var(--color-background-secondary)", border: "none" }}>
+        {!draftActive && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, flexWrap: "wrap" }}>
+            <i className="ti ti-photo" style={{ fontSize: 16 }} aria-hidden="true" />
+            <span>Heb je een Sollit-legplan als screenshot? Upload 'm, dan vul ik de strings hieronder in. Of voer ze handmatig in.</span>
+            <label style={{ padding: "5px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-primary)", cursor: "pointer", fontSize: 12 }}>
+              {importBusy ? "Bezig met lezen…" : "Screenshot uploaden"}
+              <input
+                type="file"
+                accept="image/*"
+                disabled={importBusy}
+                style={{ display: "none" }}
+                onChange={(e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (file) handleStringplanUpload(file, target);
+                }}
+              />
+            </label>
+          </div>
+        )}
+        {importError && !draftActive && <div style={{ fontSize: 12, color: "var(--color-text-danger)", marginTop: 8 }}>{importError}</div>}
+
+        {draftActive && (
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 8 }}>
+              Controleer de geëxtraheerde strings vóór toepassen — OCR kan een cijfer verkeerd lezen.
+            </div>
+            <div style={{ display: "grid", gap: 6, marginBottom: 10 }}>
+              {importDraft.rows.map((r, i) => (
+                <div key={i} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 13 }}>
+                  <input type="number" min={1} max={40} value={r.n} onChange={(e) => updateImportRow(i, "n", +e.target.value)} style={{ width: 50 }} />
+                  <span style={muted}>×</span>
+                  <select value={r.panelId} onChange={(e) => updateImportRow(i, "panelId", e.target.value)} style={{ flex: "1 1 160px", minWidth: 140 }}>
+                    {availPanels.map((p) => (
+                      <option key={p.id} value={p.id}>{p.id} — {p.wp}Wp{p.label ? ` · ${p.label}` : ""}</option>
+                    ))}
+                  </select>
+                  {r.extractedWp && (
+                    <span style={{ fontSize: 11, ...muted }}>
+                      (gelezen: {r.extractedFabrikant || "?"} {r.extractedWp}Wp)
+                    </span>
+                  )}
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ fontSize: 12, ...muted }}>Az</span>
+                    <input type="number" min={0} max={359} value={r.azimuth} onChange={(e) => updateImportRow(i, "azimuth", +e.target.value)} style={{ width: 56 }} />°
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <span style={{ fontSize: 12, ...muted }}>Hel</span>
+                    <input type="number" min={0} max={90} value={r.helling} onChange={(e) => updateImportRow(i, "helling", +e.target.value)} style={{ width: 46 }} />°
+                  </div>
+                  <button onClick={() => removeImportRow(i)} aria-label="verwijder rij" style={{ padding: "2px 6px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-danger)" }}>
+                    <i className="ti ti-trash" style={{ fontSize: 13 }} />
+                  </button>
+                </div>
+              ))}
+            </div>
+            {importError && <div style={{ fontSize: 12, color: "var(--color-text-danger)", marginBottom: 8 }}>{importError}</div>}
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={applyImportDraft} style={{ padding: "6px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500, fontSize: 13 }}>
+                Toepassen
+              </button>
+              <button onClick={() => { setImportDraft(null); setImportError(null); }} style={{ padding: "6px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", fontSize: 13 }}>
+                Annuleren
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div style={{ fontFamily: "var(--font-sans)", color: "var(--color-text-primary)", padding: "1rem 0", maxWidth: 880 }}>
@@ -412,9 +832,14 @@ export default function PVConfigurator() {
               <div style={label}>Paneel</div>
               <select value={selPanelId} onChange={(e) => setSelPanelId(e.target.value)} style={{ width: "100%", marginBottom: 8 }}>
                 {availPanels.map((p) => (
-                  <option key={p.id} value={p.id}>{p.id} — {p.wp} Wp</option>
+                  <option key={p.id} value={p.id}>{p.id} — {p.wp} Wp{p.label ? ` · ${p.label}` : ""}</option>
                 ))}
               </select>
+              {selPanel.label && (
+                <span style={{ fontSize: 11, background: "var(--color-background-info)", color: "var(--color-text-info)", padding: "2px 8px", borderRadius: "var(--border-radius-md)", display: "inline-block", marginBottom: 6 }}>
+                  {selPanel.label}
+                </span>
+              )}
               <div style={{ fontSize: 12, ...muted }}>
                 Voc {selPanel.voc} V · Vmp {selPanel.vmp} V · Isc {selPanel.isc} A · Imp {selPanel.imp} A · β {selPanel.betaVoc}%/°C
               </div>
@@ -431,9 +856,14 @@ export default function PVConfigurator() {
                 style={{ width: "100%", marginBottom: 8 }}
               >
                 {availInverters.map((i) => (
-                  <option key={i.id} value={i.id}>{i.id}</option>
+                  <option key={i.id} value={i.id}>{i.id}{i.label ? ` · ${i.label}` : ""}</option>
                 ))}
               </select>
+              {selInv.label && (
+                <span style={{ fontSize: 11, background: "var(--color-background-info)", color: "var(--color-text-info)", padding: "2px 8px", borderRadius: "var(--border-radius-md)", display: "inline-block", marginBottom: 6 }}>
+                  {selInv.label}
+                </span>
+              )}
               <div style={{ fontSize: 12, ...muted }}>
                 Vmax {selInv.vmax} V · MPPT {selInv.vmpptMin}-{selInv.vmpptMax} V · {selInv.imppt} A/{selInv.isc} A · {selInv.nMppt} MPPT × {selInv.stringsPerMppt}
                 <br />Max. AC {selInv.iacMax} A → min. afzekering <b style={{ color: "var(--color-text-primary)" }}>{selInv.minFuse} A</b> (1,25×, eerstvolgende standaard)
@@ -446,12 +876,7 @@ export default function PVConfigurator() {
             </div>
           </div>
 
-          <div style={{ ...card, marginBottom: 16, background: "var(--color-background-secondary)", border: "none" }}>
-            <div style={{ fontSize: 13 }}>
-              <i className="ti ti-photo" style={{ fontSize: 16, verticalAlign: -2, marginRight: 6 }} aria-hidden="true" />
-              Heb je een Sollit-stringplan als screenshot? Upload 'm in de chat, dan vul ik de strings hieronder voor je in. Of voer ze handmatig in.
-            </div>
-          </div>
+          {renderStringplanImport("check")}
 
           <h3 style={{ fontSize: 16, fontWeight: 500, margin: "8px 0" }}>Strings per MPPT</h3>
           <div style={{ display: "grid", gap: 10, marginBottom: 16 }}>
@@ -554,7 +979,7 @@ export default function PVConfigurator() {
               <div style={label}>Paneel</div>
               <select value={findPanelId} onChange={(e) => setFindPanelId(e.target.value)} style={{ width: "100%" }}>
                 {availPanels.map((p) => (
-                  <option key={p.id} value={p.id}>{p.id} — {p.wp} Wp</option>
+                  <option key={p.id} value={p.id}>{p.id} — {p.wp} Wp{p.label ? ` · ${p.label}` : ""}</option>
                 ))}
               </select>
             </div>
@@ -610,12 +1035,7 @@ export default function PVConfigurator() {
       {/* LEGPLAN MODE */}
       {mode === "legplan" && legInv && legResult && (
         <>
-          <div style={{ ...card, marginBottom: 16, background: "var(--color-background-secondary)", border: "none" }}>
-            <div style={{ fontSize: 13 }}>
-              <i className="ti ti-photo" style={{ fontSize: 16, verticalAlign: -2, marginRight: 6 }} aria-hidden="true" />
-              Heb je een Sollit-stringplan als screenshot? Upload 'm in de chat, dan vul ik de strings hieronder voor je in. Of voer ze handmatig in.
-            </div>
-          </div>
+          {renderStringplanImport("legplan")}
 
           {/* Strings invoer */}
           <h3 style={{ fontSize: 16, fontWeight: 500, margin: "8px 0" }}>Strings uit legplan</h3>
@@ -632,7 +1052,7 @@ export default function PVConfigurator() {
                   </div>
                   <select value={s.panelId} onChange={(e) => updateLegString(i, "panelId", e.target.value)} style={{ flex: "1 1 180px", minWidth: 140 }}>
                     {availPanels.map((p) => (
-                      <option key={p.id} value={p.id}>{p.id} — {p.wp}Wp</option>
+                      <option key={p.id} value={p.id}>{p.id} — {p.wp}Wp{p.label ? ` · ${p.label}` : ""}</option>
                     ))}
                   </select>
                   <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
@@ -660,9 +1080,14 @@ export default function PVConfigurator() {
               <div style={label}>Omvormer om te checken</div>
               <select value={legInvId} onChange={(e) => { setLegInvId(e.target.value); setManualAssign(null); }} style={{ width: "100%", marginBottom: 8 }}>
                 {availInverters.map((i) => (
-                  <option key={i.id} value={i.id}>{i.id}</option>
+                  <option key={i.id} value={i.id}>{i.id}{i.label ? ` · ${i.label}` : ""}</option>
                 ))}
               </select>
+              {legInv.label && (
+                <span style={{ fontSize: 11, background: "var(--color-background-info)", color: "var(--color-text-info)", padding: "2px 8px", borderRadius: "var(--border-radius-md)", display: "inline-block", marginBottom: 6 }}>
+                  {legInv.label}
+                </span>
+              )}
               <div style={{ fontSize: 12, ...muted }}>
                 {legInv.nMppt} MPPT × {legInv.stringsPerMppt} string · Vmax {legInv.vmax} V · {legInv.imppt} A/MPPT
               </div>
@@ -832,7 +1257,14 @@ export default function PVConfigurator() {
                   <div key={f.family} style={{ ...card, marginBottom: 10 }}>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
                       <div>
-                        <div style={{ fontWeight: 500 }}>{f.family}</div>
+                        <div style={{ fontWeight: 500 }}>
+                          {f.family}
+                          {f.custom && (
+                            <span style={{ background: "var(--color-background-warning)", color: "var(--color-text-warning)", fontSize: 11, padding: "2px 8px", borderRadius: "var(--border-radius-md)", marginLeft: 8 }}>
+                              toegevoegd — ongecontroleerd
+                            </span>
+                          )}
+                        </div>
                         {f.note && <div style={{ fontSize: 12, ...muted }}>{f.note}</div>}
                       </div>
                       <button
@@ -844,22 +1276,32 @@ export default function PVConfigurator() {
                     </div>
                     <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 10 }}>
                       {f.variants.map((v) => (
-                        <button
-                          key={v.id}
-                          onClick={() => toggleVariant(key, f.family, v.id)}
-                          style={{
-                            fontSize: 12,
-                            padding: "5px 10px",
-                            borderRadius: "var(--border-radius-md)",
-                            border: "0.5px solid var(--color-border-secondary)",
-                            cursor: "pointer",
-                            background: v.available ? "var(--color-background-info)" : "transparent",
-                            color: v.available ? "var(--color-text-info)" : "var(--color-text-tertiary)",
-                            textDecoration: v.available ? "none" : "line-through",
-                          }}
-                        >
-                          {v.id}{key === "panel" ? ` · ${v.wp}Wp` : ""}
-                        </button>
+                        <span key={v.id} style={{ display: "inline-flex", alignItems: "center", gap: 2 }}>
+                          <button
+                            onClick={() => toggleVariant(key, f.family, v.id)}
+                            style={{
+                              fontSize: 12,
+                              padding: "5px 10px",
+                              borderRadius: "var(--border-radius-md)",
+                              border: "0.5px solid var(--color-border-secondary)",
+                              cursor: "pointer",
+                              background: v.available ? "var(--color-background-info)" : "transparent",
+                              color: v.available ? "var(--color-text-info)" : "var(--color-text-tertiary)",
+                              textDecoration: v.available ? "none" : "line-through",
+                            }}
+                          >
+                            {v.id}{key === "panel" ? ` · ${v.wp}Wp` : ""}
+                            {v.custom && !f.custom && <span style={{ marginLeft: 4, fontSize: 10, color: "var(--color-text-warning)" }}>(nieuw)</span>}
+                            {v.label && <span style={{ marginLeft: 4, fontSize: 10, color: "var(--color-text-info)" }}>· {v.label}</span>}
+                          </button>
+                          <button
+                            onClick={() => editLabel(key, v.id, v.label)}
+                            title="Label bewerken"
+                            style={{ fontSize: 11, padding: "5px 6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", background: "transparent", cursor: "pointer", color: "var(--color-text-secondary)" }}
+                          >
+                            <i className="ti ti-tag" style={{ fontSize: 13 }} aria-hidden="true" />
+                          </button>
+                        </span>
                       ))}
                     </div>
                   </div>
@@ -867,6 +1309,195 @@ export default function PVConfigurator() {
               })}
             </div>
           ))}
+
+          <div style={card}>
+            <h3 style={{ fontSize: 16, fontWeight: 500, margin: "0 0 4px" }}>Nieuw component toevoegen</h3>
+            <p style={{ fontSize: 12, ...muted, marginTop: 0, marginBottom: 12 }}>
+              Gedeeld met alle collega's. Nieuwe componenten starten als "ongecontroleerd" — controleer de waarden tegen de datasheet voordat je ze productief gebruikt.
+            </p>
+
+            <div style={{ display: "flex", gap: 24, marginBottom: 12, flexWrap: "wrap", alignItems: "flex-end" }}>
+              <div>
+                <div style={label}>Type</div>
+                <select
+                  value={addType}
+                  onChange={(e) => { setAddType(e.target.value); setAddFamilyName(""); setAddVariant({}); setAddStatus(null); setDatasheetDraft(null); setDatasheetError(null); }}
+                  style={{ width: 130 }}
+                >
+                  <option value="panel">Paneel</option>
+                  <option value="inverter">Omvormer</option>
+                </select>
+              </div>
+              <div>
+                <div style={label}>Datasheet uploaden</div>
+                <label style={{ display: "inline-block", padding: "6px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", fontSize: 13 }}>
+                  {datasheetBusy ? "Bezig met lezen…" : "PDF of foto uploaden"}
+                  <input
+                    type="file"
+                    accept="application/pdf,image/*"
+                    disabled={datasheetBusy}
+                    style={{ display: "none" }}
+                    onChange={(e) => {
+                      const file = e.target.files?.[0];
+                      e.target.value = "";
+                      if (file) handleDatasheetUpload(file);
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
+            {datasheetError && <div style={{ fontSize: 12, color: "var(--color-text-danger)", marginBottom: 12 }}>{datasheetError}</div>}
+
+            {datasheetDraft && (
+              <div style={{ ...card, background: "var(--color-background-secondary)", border: "none", marginBottom: 16 }}>
+                <div style={{ fontSize: 13, fontWeight: 500, marginBottom: 10 }}>
+                  Controleer de uit de datasheet gelezen gegevens vóór toevoegen — een verkeerd gelezen waarde zit anders voorgoed fout in de database.
+                </div>
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+                  <div>
+                    <div style={label}>Familienaam {datasheetDraft.isNewFamily ? "(nieuw)" : "(bestaand — match gevonden)"}</div>
+                    <input type="text" value={datasheetDraft.familyName} onChange={(e) => updateDatasheetMeta("familyName", e.target.value)} style={{ width: 280 }} />
+                  </div>
+                  {datasheetDraft.isNewFamily && addType === "panel" && (
+                    <>
+                      <div>
+                        <div style={label}>β Voc (%/°C)</div>
+                        <input type="number" step="0.01" value={datasheetDraft.betaVoc} onChange={(e) => updateDatasheetMeta("betaVoc", e.target.value)} style={{ width: 90 }} />
+                      </div>
+                      <div>
+                        <div style={label}>Vsys max (V)</div>
+                        <input type="number" value={datasheetDraft.vsysMax} onChange={(e) => updateDatasheetMeta("vsysMax", e.target.value)} style={{ width: 90 }} />
+                      </div>
+                    </>
+                  )}
+                </div>
+
+                <div style={{ display: "grid", gap: 8, marginBottom: 12 }}>
+                  {datasheetDraft.rows.map((r, i) => (
+                    <div key={i} style={{ ...card, padding: "10px 12px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <input type="checkbox" checked={r.include} onChange={() => toggleDatasheetRow(i)} />
+                      {(addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS).map((f) => (
+                        <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                          <span style={{ fontSize: 10, ...muted }}>{f.label}</span>
+                          <input
+                            type={f.key === "id" ? "text" : "number"}
+                            step={f.step}
+                            value={r[f.key] ?? ""}
+                            onChange={(e) => updateDatasheetRow(i, f.key, e.target.value)}
+                            style={{ width: f.key === "id" ? 140 : 70 }}
+                          />
+                        </div>
+                      ))}
+                      {r.iacMaxComputed && (
+                        <span style={{ fontSize: 11, color: "var(--color-text-warning)" }}>iacMax berekend (pacNom/400V/√3), niet in datasheet — extra controleren</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    onClick={applyDatasheetDraft}
+                    style={{ padding: "6px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500, fontSize: 13 }}
+                  >
+                    Geselecteerde toevoegen
+                  </button>
+                  <button
+                    onClick={() => { setDatasheetDraft(null); setDatasheetError(null); }}
+                    style={{ padding: "6px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", fontSize: 13 }}
+                  >
+                    Annuleren
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {!datasheetDraft && (
+            <>
+            <div style={{ display: "flex", gap: 24, marginBottom: 12, flexWrap: "wrap" }}>
+              <div>
+                <div style={label}>Familie</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    onClick={() => { setAddFamilyMode("existing"); setAddFamilyName(""); setAddStatus(null); }}
+                    style={{ fontSize: 13, padding: "6px 12px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: addFamilyMode === "existing" ? "var(--color-background-info)" : "transparent", color: addFamilyMode === "existing" ? "var(--color-text-info)" : "var(--color-text-primary)" }}
+                  >
+                    Bestaande
+                  </button>
+                  <button
+                    onClick={() => { setAddFamilyMode("new"); setAddFamilyName(""); setAddStatus(null); }}
+                    style={{ fontSize: 13, padding: "6px 12px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: addFamilyMode === "new" ? "var(--color-background-info)" : "transparent", color: addFamilyMode === "new" ? "var(--color-text-info)" : "var(--color-text-primary)" }}
+                  >
+                    Nieuwe
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {addFamilyMode === "existing" ? (
+              <div style={{ marginBottom: 12 }}>
+                <div style={label}>Bestaande familie</div>
+                <select value={addFamilyName} onChange={(e) => setAddFamilyName(e.target.value)} style={{ width: 320 }}>
+                  <option value="">— kies —</option>
+                  {(addType === "panel" ? panelDb : inverterDb).map((f) => (
+                    <option key={f.family} value={f.family}>{f.family}</option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+                <div>
+                  <div style={label}>Nieuwe familienaam</div>
+                  <input type="text" value={addFamilyName} onChange={(e) => setAddFamilyName(e.target.value)} style={{ width: 240 }} />
+                </div>
+                {addType === "panel" && (
+                  <>
+                    <div>
+                      <div style={label}>β Voc (%/°C)</div>
+                      <input type="number" step="0.01" value={addBetaVoc} onChange={(e) => setAddBetaVoc(e.target.value)} style={{ width: 90 }} />
+                    </div>
+                    <div>
+                      <div style={label}>Vsys max (V)</div>
+                      <input type="number" value={addVsysMax} onChange={(e) => setAddVsysMax(e.target.value)} style={{ width: 90 }} />
+                    </div>
+                  </>
+                )}
+                <div>
+                  <div style={label}>Notitie (optioneel)</div>
+                  <input type="text" value={addNote} onChange={(e) => setAddNote(e.target.value)} style={{ width: 200 }} />
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 8, marginBottom: 12, maxWidth: 700 }}>
+              {(addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS).map((f) => (
+                <div key={f.key}>
+                  <div style={label}>{f.label}</div>
+                  <input
+                    type={f.key === "id" ? "text" : "number"}
+                    step={f.step}
+                    value={addVariant[f.key] ?? ""}
+                    onChange={(e) => setAddVariant((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                    style={{ width: "100%" }}
+                  />
+                </div>
+              ))}
+            </div>
+
+            <button
+              onClick={submitAddComponent}
+              style={{ padding: "6px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500 }}
+            >
+              Toevoegen
+            </button>
+            </>
+            )}
+            {addStatus && (
+              <div style={{ fontSize: 12, marginTop: 8, color: addStatus.type === "error" ? "var(--color-text-danger)" : "var(--color-text-success)" }}>
+                {addStatus.message}
+              </div>
+            )}
+          </div>
         </>
       )}
 
