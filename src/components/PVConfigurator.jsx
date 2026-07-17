@@ -160,6 +160,12 @@ export default function PVConfigurator() {
   const [legAssignMode, setLegAssignMode] = useState("auto"); // "auto" | "manual"
   const [manualAssign, setManualAssign] = useState(null); // [[idx,...], ...] per MPPT
 
+  // Herverdeel-agent: stelt alleen een manualAssign-waarde voor, checkLegplan
+  // (rekenkern, ongewijzigd) blijft het enige oordeel over of het klopt.
+  const [agentInstruction, setAgentInstruction] = useState("");
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentStatus, setAgentStatus] = useState(null); // { type, message }
+
   // Componenten beheren: formulier voor nieuwe componenten
   const [addType, setAddType] = useState("panel"); // "panel" | "inverter"
   const [addFamilyMode, setAddFamilyMode] = useState("existing"); // "existing" | "new"
@@ -343,6 +349,66 @@ export default function PVConfigurator() {
       if (mpptIdx >= 0) base[mpptIdx].push(stringIdx);
       return base;
     });
+  }
+
+  // Verzamelt de falende checks uit een checkLegplan-resultaat als leesbare
+  // regels, voor teruggave aan de agent bij een herkansing.
+  function failureMessages(mpptResults) {
+    const msgs = [];
+    for (const m of mpptResults) {
+      if (m.empty || m.pass) continue;
+      for (const c of m.checks) {
+        if (!c.pass) msgs.push(`MPPT ${m.mpptNum + 1}: ${c.label} = ${fmtCheckValue(c)} (${fmtCheckLimit(c)})`);
+      }
+    }
+    return msgs;
+  }
+
+  // Vraagt de agent om een MPPT-indeling voor te stellen op basis van een
+  // vrije-tekst-instructie. Het voorstel wordt via checkLegplan (rekenkern,
+  // ongewijzigd) gevalideerd — bij een elektrische fout krijgt de agent één
+  // herkansing met de concrete overschrijding; daarna wordt getoond wat er
+  // is, mét eventuele falende checks zichtbaar (geen stille aannames).
+  async function runReassignAgent() {
+    if (!agentInstruction.trim()) {
+      setAgentStatus({ type: "error", message: "Geef eerst een instructie." });
+      return;
+    }
+    setAgentBusy(true);
+    setAgentStatus(null);
+    try {
+      const payload = {
+        strings: legStringsResolved.map((s) => ({ n: s.n, azimuth: s.azimuth, helling: s.helling, wp: s.panel.wp })),
+        nMppt: legInv.nMppt,
+        stringsPerMppt: legInv.stringsPerMppt,
+        currentAssignment: { mppts: legAssignment.mppts },
+        instruction: agentInstruction.trim(),
+      };
+      let data = await apiFetch("/api/reassign-strings", { method: "POST", body: JSON.stringify(payload) });
+      let result = checkLegplan(legStringsResolved, legInv, { mppts: data.mppts, overflow: false }, tMinCold, tMaxHot);
+      let attempts = 1;
+      if (!result.pass) {
+        const failures = failureMessages(result.mpptResults);
+        data = await apiFetch("/api/reassign-strings", {
+          method: "POST",
+          body: JSON.stringify({ ...payload, previousAttempt: { mppts: data.mppts, failures } }),
+        });
+        result = checkLegplan(legStringsResolved, legInv, { mppts: data.mppts, overflow: false }, tMinCold, tMaxHot);
+        attempts = 2;
+      }
+      setLegAssignMode("manual");
+      setManualAssign(data.mppts);
+      setAgentStatus({
+        type: result.pass ? "ok" : "error",
+        message: result.pass
+          ? `Voorstel toegepast (${attempts === 1 ? "in één keer" : "na één herkansing"}) — voldoet aan alle elektrische grenzen.`
+          : `Voorstel toegepast na ${attempts} poging(en), voldoet nog niet aan alle grenzen — zie de rode checks hieronder. Pas zelf verder aan of probeer een andere instructie.`,
+      });
+    } catch (e) {
+      setAgentStatus({ type: "error", message: e.message });
+    } finally {
+      setAgentBusy(false);
+    }
   }
 
   function toggleVariant(dbType, family, id) {
@@ -1100,6 +1166,36 @@ export default function PVConfigurator() {
               </div>
               <div style={{ fontSize: 12, ...muted, marginTop: 6 }}>Automatisch houdt zelfde oriëntatie op zelfde MPPT.</div>
             </div>
+          </div>
+
+          {/* Herverdeel-agent */}
+          <div style={{ ...card, marginBottom: 16 }}>
+            <div style={label}>Agent: herverdeel strings op instructie</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <input
+                type="text"
+                value={agentInstruction}
+                onChange={(e) => setAgentInstruction(e.target.value)}
+                placeholder="bijv. 'zet string 3 en 4 samen' of 'verdeel zo gelijkmatig mogelijk'"
+                style={{ flex: "1 1 320px", minWidth: 240 }}
+                disabled={agentBusy}
+              />
+              <button
+                onClick={runReassignAgent}
+                disabled={agentBusy}
+                style={{ padding: "6px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: agentBusy ? "default" : "pointer", fontWeight: 500, fontSize: 13, opacity: agentBusy ? 0.6 : 1 }}
+              >
+                {agentBusy ? "Bezig…" : "Agent toepassen"}
+              </button>
+            </div>
+            <div style={{ fontSize: 11, ...muted, marginTop: 6 }}>
+              De agent stelt alleen een indeling voor — of die elektrisch klopt, bepaalt de rekenkern hieronder, net als bij een handmatige toewijzing.
+            </div>
+            {agentStatus && (
+              <div style={{ fontSize: 12, marginTop: 8, color: agentStatus.type === "error" ? "var(--color-text-danger)" : "var(--color-text-success)" }}>
+                {agentStatus.message}
+              </div>
+            )}
           </div>
 
           {/* Eindoordeel */}
