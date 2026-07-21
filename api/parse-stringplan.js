@@ -3,9 +3,21 @@ import { checkAuth } from "./_auth.js";
 
 const client = new Anthropic(); // ANTHROPIC_API_KEY uit env
 
-const PROMPT = `Lees dit Sollit-stringplan. Geef voor elke string een JSON-object terug met:
+const PROMPT = `Lees dit Sollit-stringplan. Geef voor elke string (of stringgroep per oriëntatie) een JSON-object terug met:
 { "n": <aantal panelen>, "wp": <vermogen per paneel in Wp>, "fabrikant": "<naam>",
   "azimuth": <graden, 0-359>, "helling": <graden, 0-90> }
+
+Er komen twee rijstijlen voor:
+1. Eén regel per string, bijv. "19x JA Solar - 430 Wp ... Azimuth: 142°; Helling: 5°" — geef hiervoor één object.
+2. Een totaalregel gevolgd door een "waarvan"-uitsplitsing naar oriëntatie, bijv.:
+   "360x Longi - 540 Wp Full Black panelen (194400 Wp)
+    Waarvan:
+    - 180 panelen Azimuth: 260°; Helling: 10°
+    - 180 panelen Azimuth: 80°; Helling: 10°"
+   Geef in dit geval GEEN apart object voor de totaalregel (de "360x"-regel) — die is uitsluitend de som van de uitsplitsing eronder. Geef alleen één object per "waarvan"-regel (in dit voorbeeld dus precies 2 objecten: 180 @ 260°/10° en 180 @ 80°/10°).
+
+Tel nooit een totaal-/samenvattingsregel én de bijbehorende uitsplitsing allebei mee — dat verdubbelt het aantal panelen en het aantal strings.
+
 Geef een JSON-array, niets anders. Geen markdown, geen uitleg.
 Als je een veld niet kan lezen, zet de waarde op null in plaats van te gokken.`;
 
