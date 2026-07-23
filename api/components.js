@@ -1,5 +1,5 @@
 import { neon } from "@neondatabase/serverless";
-import { checkAuth } from "./_auth.js";
+import { requireUser } from "./_auth.js";
 
 const sql = neon(process.env.DATABASE_URL);
 
@@ -12,7 +12,8 @@ const VARIANT_FIELDS = {
 };
 
 export default async function handler(req, res) {
-  if (!checkAuth(req, res)) return;
+  const user = await requireUser(req, res);
+  if (!user) return;
 
   if (req.method === "GET") {
     const rows = await sql`

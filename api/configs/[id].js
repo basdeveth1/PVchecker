@@ -1,18 +1,20 @@
 import { neon } from "@neondatabase/serverless";
-import { checkAuth } from "../_auth.js";
+import { requireUser } from "../_auth.js";
 
 const sql = neon(process.env.DATABASE_URL);
 
 export default async function handler(req, res) {
-  if (!checkAuth(req, res)) return;
+  const user = await requireUser(req, res);
+  if (!user) return;
 
   const { id } = req.query;
 
   if (req.method === "GET") {
     const [row] = await sql`
-      select id, name, sollit_id, payload, created_at
-      from configs
-      where id = ${id}
+      select c.id, c.name, c.sollit_id, c.payload, c.created_at, u.name as created_by_name
+      from configs c
+      left join neon_auth."user" u on u.id = c.created_by
+      where c.id = ${id}
     `;
     if (!row) {
       res.status(404).json({ error: "Configuratie niet gevonden." });

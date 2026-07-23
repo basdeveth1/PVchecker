@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { checkAuth } from "./_auth.js";
+import { requireUser } from "./_auth.js";
 
 const client = new Anthropic(); // ANTHROPIC_API_KEY uit env
 
@@ -37,7 +37,8 @@ Geef alleen JSON terug, geen markdown, geen uitleg. Als je een veld niet zeker k
 }
 
 export default async function handler(req, res) {
-  if (!checkAuth(req, res)) return;
+  const user = await requireUser(req, res);
+  if (!user) return;
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;

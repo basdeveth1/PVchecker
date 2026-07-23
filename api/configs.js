@@ -1,16 +1,18 @@
 import { neon } from "@neondatabase/serverless";
-import { checkAuth } from "./_auth.js";
+import { requireUser } from "./_auth.js";
 
 const sql = neon(process.env.DATABASE_URL);
 
 export default async function handler(req, res) {
-  if (!checkAuth(req, res)) return;
+  const user = await requireUser(req, res);
+  if (!user) return;
 
   if (req.method === "GET") {
     const rows = await sql`
-      select id, name, sollit_id, created_at
-      from configs
-      order by created_at desc
+      select c.id, c.name, c.sollit_id, c.created_at, u.name as created_by_name
+      from configs c
+      left join neon_auth."user" u on u.id = c.created_by
+      order by c.created_at desc
       limit 200
     `;
     res.status(200).json({ configs: rows });
@@ -24,8 +26,8 @@ export default async function handler(req, res) {
       return;
     }
     const [row] = await sql`
-      insert into configs (name, sollit_id, payload)
-      values (${String(name).trim()}, ${String(sollitId).trim()}, ${JSON.stringify(payload)})
+      insert into configs (name, sollit_id, payload, created_by)
+      values (${String(name).trim()}, ${String(sollitId).trim()}, ${JSON.stringify(payload)}, ${user.id})
       returning id, name, sollit_id, created_at
     `;
     res.status(201).json({ config: row });

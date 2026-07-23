@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { checkAuth } from "./_auth.js";
+import { requireUser } from "./_auth.js";
 import { checkConfig, allPass, findMatchingInverters, checkLegplanMulti, autoAssign, checkLegplan, distributeCounts } from "../src/core/calculations.js";
 
 const client = new Anthropic(); // ANTHROPIC_API_KEY uit env
@@ -195,7 +195,8 @@ Geef aan het eind een helder, beknopt antwoord in het Nederlands. Vermeld explic
 const MAX_ROUNDS = 8;
 
 export default async function handler(req, res) {
-  if (!checkAuth(req, res)) return;
+  const user = await requireUser(req, res);
+  if (!user) return;
   if (req.method !== "POST") {
     res.status(405).json({ error: "Method not allowed" });
     return;

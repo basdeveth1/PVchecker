@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
+import { createAuthClient } from "@neondatabase/neon-js/auth";
 import { getPanelFamilies, getInverterFamilies, flattenPanels, flattenInverters, mergeCustomComponents, applyLabels } from "../data/loader.js";
 import {
   CONNECTIONS,
@@ -92,26 +93,29 @@ function resizeCheckStrings(prev, inv) {
   );
 }
 
-// Gedeeld wachtwoord voor /api/* — eenmalig gevraagd bij het eerste gebruik
-// van opslaan/laden, daarna onthouden in deze browser. Geen accounts, alleen
-// bescherming tegen misbruik van de publieke, niet-ingelogde link.
-// Wordt nu al bij het openen van de pagina gevraagd via de login-gate
-// hieronder, in plaats van pas bij de eerste opslaan/laden-actie.
-const APP_KEY_STORAGE = "pvconfigurator_app_key";
+// Echte per-gebruiker login via Neon Auth (Managed Better Auth) — vervangt
+// het vorige gedeelde-wachtwoord-model volledig. Accounts worden door een
+// admin aangemaakt (scripts/create-user.mjs), geen zelfregistratie in de UI.
+const authClient = createAuthClient(import.meta.env.VITE_NEON_AUTH_URL);
 
+// Elke aanroep haalt een verse, kortlevende JWT op (authClient.token()) en
+// stuurt 'm mee als Bearer-token — api/_auth.js verifieert die tegen de
+// JWKS van dezelfde Neon Auth-service.
 async function apiFetch(path, opts = {}) {
-  let key = localStorage.getItem(APP_KEY_STORAGE);
-  if (!key) {
-    key = window.prompt("Wachtwoord voor collega's (eenmalig, wordt onthouden in deze browser):") || "";
-    localStorage.setItem(APP_KEY_STORAGE, key);
-  }
+  // authClient.token() geeft in deze client-versie hetzelfde terug als
+  // getSession() (session+user, geen JWT) — de /token-endpoint zelf roepen
+  // we daarom rechtstreeks aan, met de sessie-cookie die signIn.email zette.
+  const tokenRes = await fetch(`${import.meta.env.VITE_NEON_AUTH_URL}/token`, { credentials: "include" });
+  const tokenData = tokenRes.ok ? await tokenRes.json() : null;
+  const token = tokenData?.token;
+  if (!token) throw new Error("Niet ingelogd — log opnieuw in.");
+
   const res = await fetch(path, {
     ...opts,
-    headers: { ...(opts.headers || {}), "x-app-key": key, ...(opts.body ? { "Content-Type": "application/json" } : {}) },
+    headers: { ...(opts.headers || {}), Authorization: `Bearer ${token}`, ...(opts.body ? { "Content-Type": "application/json" } : {}) },
   });
   if (res.status === 401) {
-    localStorage.removeItem(APP_KEY_STORAGE);
-    throw new Error("Wachtwoord onjuist — probeer opnieuw op te slaan/laden.");
+    throw new Error("Sessie verlopen — log opnieuw in.");
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -121,50 +125,44 @@ async function apiFetch(path, opts = {}) {
 }
 
 export default function PVConfigurator() {
-  // Login-gate: het wachtwoord wordt nu al bij het openen van de pagina
-  // gevraagd, vóór de rest van de tool zichtbaar wordt — niet pas bij de
-  // eerste opslaan/laden-actie zoals voorheen.
-  const [checkingKey, setCheckingKey] = useState(true);
-  const [unlocked, setUnlocked] = useState(false);
-  const [loginInput, setLoginInput] = useState("");
+  // Login-gate: blokkeert de hele tool tot er een geldige Neon Auth-sessie is.
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [session, setSession] = useState(null); // { user: { id, name, email } } | null
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
   const [loginError, setLoginError] = useState(null);
   const [loginBusy, setLoginBusy] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const stored = localStorage.getItem(APP_KEY_STORAGE);
-      if (!stored) {
-        setCheckingKey(false);
-        return;
-      }
-      try {
-        const res = await fetch("/api/verify-key", { headers: { "x-app-key": stored } });
-        if (res.ok) setUnlocked(true);
-        else localStorage.removeItem(APP_KEY_STORAGE);
-      } catch {
-        // netwerkfout: laat het opgeslagen wachtwoord staan, gate toont het formulier
-      }
-      setCheckingKey(false);
+      const { data } = await authClient.getSession();
+      if (data?.user) setSession(data);
+      setCheckingSession(false);
     })();
   }, []);
 
   async function handleLogin() {
-    if (!loginInput.trim() || loginBusy) return;
+    if (!loginEmail.trim() || !loginPassword || loginBusy) return;
     setLoginBusy(true);
     setLoginError(null);
     try {
-      const res = await fetch("/api/verify-key", { headers: { "x-app-key": loginInput } });
-      if (res.ok) {
-        localStorage.setItem(APP_KEY_STORAGE, loginInput);
-        setUnlocked(true);
-      } else {
-        setLoginError("Wachtwoord onjuist.");
+      const { error } = await authClient.signIn.email({ email: loginEmail.trim(), password: loginPassword });
+      if (error) {
+        setLoginError("E-mailadres of wachtwoord onjuist.");
+        return;
       }
+      const { data } = await authClient.getSession();
+      setSession(data);
     } catch {
       setLoginError("Kon niet verbinden met de server. Probeer het opnieuw.");
     } finally {
       setLoginBusy(false);
     }
+  }
+
+  async function handleLogout() {
+    await authClient.signOut();
+    setSession(null);
   }
 
   const [panelDb, setPanelDb] = useState(() => getPanelFamilies());
@@ -375,7 +373,10 @@ export default function PVConfigurator() {
       setTMinCold(p.tMinCold);
       setTMaxHot(p.tMaxHot);
       setConnId(p.connId);
-      setSaveStatus({ type: "ok", message: `"${data.config.name}" geladen.` });
+      setSaveStatus({
+        type: "ok",
+        message: `"${data.config.name}" geladen${data.config.created_by_name ? ` (gemaakt door ${data.config.created_by_name})` : ""}.`,
+      });
     } catch (e) {
       setSaveStatus({ type: "error", message: e.message });
     }
@@ -551,11 +552,11 @@ export default function PVConfigurator() {
   }
 
   useEffect(() => {
-    // Alleen automatisch laden als het wachtwoord al bekend is — anders niet
-    // meteen bij opstarten om een prompt vragen, zoals ook opgeslagen
-    // configuraties pas laden na een expliciete actie.
-    if (localStorage.getItem(APP_KEY_STORAGE)) fetchCustomComponents();
-  }, []);
+    // Pas laden zodra er een geldige sessie is — anders faalt de aanroep
+    // (apiFetch vereist een ingelogde gebruiker) nog vóór de login-gate
+    // getoond is.
+    if (session?.user) fetchCustomComponents();
+  }, [session]);
 
   useEffect(() => {
     if (mode === "library") fetchCustomComponents();
@@ -886,7 +887,7 @@ export default function PVConfigurator() {
     );
   }
 
-  if (checkingKey) {
+  if (checkingSession) {
     return (
       <div style={{ fontFamily: "var(--font-sans)", color: "var(--color-text-secondary)", padding: "2rem 0", textAlign: "center" }}>
         Laden…
@@ -894,30 +895,38 @@ export default function PVConfigurator() {
     );
   }
 
-  if (!unlocked) {
+  if (!session?.user) {
     return (
       <div style={{ fontFamily: "var(--font-sans)", color: "var(--color-text-primary)", maxWidth: 360, margin: "10vh auto 0", padding: "0 1rem" }}>
         <div style={card}>
           <h2 style={{ fontSize: 18, fontWeight: 500, margin: "0 0 6px" }}>PV Configurator</h2>
           <p style={{ fontSize: 13, ...muted, marginTop: 0, marginBottom: 16 }}>
-            Voer het wachtwoord voor collega's in om de tool te gebruiken.
+            Log in met je account om de tool te gebruiken. Nog geen account? Vraag Bas om er een voor je aan te maken.
           </p>
           <input
+            type="email"
+            value={loginEmail}
+            onChange={(e) => setLoginEmail(e.target.value)}
+            placeholder="E-mailadres"
+            autoFocus
+            disabled={loginBusy}
+            style={{ width: "100%", marginBottom: 8 }}
+          />
+          <input
             type="password"
-            value={loginInput}
-            onChange={(e) => setLoginInput(e.target.value)}
+            value={loginPassword}
+            onChange={(e) => setLoginPassword(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") handleLogin();
             }}
             placeholder="Wachtwoord"
-            autoFocus
             disabled={loginBusy}
             style={{ width: "100%", marginBottom: 10 }}
           />
           <button
             onClick={handleLogin}
-            disabled={loginBusy || !loginInput.trim()}
-            style={{ width: "100%", padding: "8px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: loginBusy ? "default" : "pointer", fontWeight: 500, opacity: loginBusy || !loginInput.trim() ? 0.6 : 1 }}
+            disabled={loginBusy || !loginEmail.trim() || !loginPassword}
+            style={{ width: "100%", padding: "8px 14px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: loginBusy ? "default" : "pointer", fontWeight: 500, opacity: loginBusy || !loginEmail.trim() || !loginPassword ? 0.6 : 1 }}
           >
             {loginBusy ? "Bezig…" : "Inloggen"}
           </button>
@@ -931,12 +940,23 @@ export default function PVConfigurator() {
 
   return (
     <div style={{ fontFamily: "var(--font-sans)", color: "var(--color-text-primary)", padding: "1rem 0", maxWidth: 880 }}>
-      <div style={{ display: "flex", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
-        {tabBtn("check", "Configuratie checken")}
-        {tabBtn("find", "Omvormer zoeken")}
-        {tabBtn("legplan", "Legplan-check")}
-        {tabBtn("library", "Componenten beheren")}
-        {tabBtn("agent", "Agent")}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 16, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {tabBtn("check", "Configuratie checken")}
+          {tabBtn("find", "Omvormer zoeken")}
+          {tabBtn("legplan", "Legplan-check")}
+          {tabBtn("library", "Componenten beheren")}
+          {tabBtn("agent", "Agent")}
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, ...muted }}>
+          <span>{session.user.name || session.user.email}</span>
+          <button
+            onClick={handleLogout}
+            style={{ padding: "4px 10px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-secondary)" }}
+          >
+            Uitloggen
+          </button>
+        </div>
       </div>
 
       {/* Hoofdaansluiting + temperatuurinstellingen */}
@@ -989,7 +1009,9 @@ export default function PVConfigurator() {
                 >
                   <option value="">— kies —</option>
                   {savedConfigs.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name} ({c.sollit_id})</option>
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.sollit_id}){c.created_by_name ? ` — ${c.created_by_name}` : ""}
+                    </option>
                   ))}
                 </select>
                 <button
