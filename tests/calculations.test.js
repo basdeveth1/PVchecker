@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   vocAtTemp,
+  stringVocStc,
   tempAtMaxVoltage,
   minFuse,
   checkConfig,
@@ -36,6 +37,10 @@ test("Voc stijgt bij koude", () => {
   assert.ok(cold > JA430.voc, "Voc bij -10°C moet hoger zijn dan STC");
   // -10°C: 38,32 × (1 + 0,0026×35) ≈ 41,8 V
   assert.ok(Math.abs(cold - 41.8) < 0.2, `verwacht ~41,8 V, kreeg ${cold.toFixed(2)}`);
+});
+
+test("stringVocStc: Voc STC voor een string van 19 panelen", () => {
+  assert.equal(stringVocStc(JA430, 19), 19 * 38.32);
 });
 
 test("26 panelen STC past net (<1000V), bij koude niet", () => {

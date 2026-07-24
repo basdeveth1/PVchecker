@@ -1,5 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef } from "react";
 import { createAuthClient } from "@neondatabase/neon-js/auth";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import { getPanelFamilies, getInverterFamilies, flattenPanels, flattenInverters, mergeCustomComponents, applyLabels } from "../data/loader.js";
 import {
   CONNECTIONS,
@@ -8,6 +10,7 @@ import {
   findMatchingInverters,
   autoAssign,
   checkLegplan,
+  stringVocStc,
 } from "../core/calculations.js";
 
 // ============================================================================
@@ -86,6 +89,7 @@ const DESIGN_STEPS = [
   { id: "invoer", label: "Invoer" },
   { id: "indeling", label: "Indeling" },
   { id: "resultaat", label: "Resultaat" },
+  { id: "rapport", label: "Rapport" },
 ];
 
 // Echte per-gebruiker login via Neon Auth (Managed Better Auth) — vervangt
@@ -184,6 +188,10 @@ export default function PVConfigurator() {
   const [designAssignMode, setDesignAssignMode] = useState("auto"); // "auto" | "manual"
   const [designManualAssign, setDesignManualAssign] = useState(null); // [[idx,...], ...] per MPPT
 
+  // Rapport-stap: optioneel legplan-screenshot (dataURL) voor in de
+  // monteurs-PDF — puur ter illustratie, wordt niet uitgelezen/geëxtraheerd.
+  const [reportImage, setReportImage] = useState(null);
+
   // Opslaan/laden van gedeelde configuraties (naam + Sollit-ID, verplicht)
   const [savedConfigs, setSavedConfigs] = useState([]);
   const [selectedLoadId, setSelectedLoadId] = useState("");
@@ -267,6 +275,73 @@ export default function PVConfigurator() {
     if (!designInv || designStringsResolved.length === 0) return null;
     return checkLegplan(designStringsResolved, designInv, designAssignment, tMinCold, tMaxHot);
   }, [designInv, designStringsResolved, designAssignment, tMinCold, tMaxHot]);
+
+  // Rapport voor de monteur: label = omvormer.mppt.string (omvormer altijd
+  // "1" zolang de tool één omvormer per ontwerp ondersteunt) + Voc STC per
+  // string, zodat een stringmeting na aanleg vergeleken kan worden.
+  const reportRows = useMemo(() => {
+    if (!designAssignment.mppts.length) return [];
+    return designAssignment.mppts.flatMap((stringIdxs, mIdx) =>
+      stringIdxs.map((si, sIdxInMppt) => {
+        const s = designStringsResolved[si];
+        return {
+          label: `1.${mIdx + 1}.${sIdxInMppt + 1}`,
+          mppt: mIdx + 1,
+          n: s.n,
+          panelId: s.panelId,
+          wp: s.panel.wp,
+          vocStc: stringVocStc(s.panel, s.n),
+        };
+      })
+    );
+  }, [designAssignment, designStringsResolved]);
+
+  async function handleReportImageFile(file) {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+    setReportImage(dataUrl);
+  }
+
+  function handleReportImagePaste(e) {
+    const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith("image/"));
+    if (!item) return;
+    e.preventDefault();
+    const file = item.getAsFile();
+    if (file) handleReportImageFile(file);
+  }
+
+  function generateReportPdf() {
+    if (!designInv || reportRows.length === 0) return;
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    doc.setFontSize(14);
+    doc.text(saveName || "PV-installatie", 14, 16);
+    let y = 24;
+    if (reportImage) {
+      const imgProps = doc.getImageProperties(reportImage);
+      const w = pageWidth - 28;
+      const h = (imgProps.height * w) / imgProps.width;
+      doc.addImage(reportImage, imgProps.fileType, 14, y, w, h);
+      y += h + 10;
+    }
+    autoTable(doc, {
+      startY: y,
+      head: [["Omvormer", "MPPT", "String", "Aantal PV", "Wp", "Voc STC (V)"]],
+      body: reportRows.map((r) => [designInv.id, r.mppt, r.label, r.n, r.wp, r.vocStc.toFixed(1)]),
+    });
+    doc.setFontSize(9);
+    doc.setTextColor(120);
+    doc.text(
+      "Ontwerphulp, geen vervanging voor toetsing door een gekwalificeerd persoon.",
+      14,
+      doc.internal.pageSize.getHeight() - 10
+    );
+    doc.save(`${(saveName || "pv-installatie").trim().replace(/\s+/g, "-") || "pv-installatie"}.pdf`);
+  }
 
   async function refreshSavedConfigs() {
     try {
@@ -1195,9 +1270,107 @@ export default function PVConfigurator() {
                 )}
               </div>
 
-              <button onClick={() => setDesignStep("indeling")} style={{ padding: "8px 18px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer" }}>
-                Terug
-              </button>
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <button onClick={() => setDesignStep("indeling")} style={{ padding: "8px 18px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer" }}>
+                  Terug
+                </button>
+                <button
+                  onClick={() => setDesignStep("rapport")}
+                  style={{ padding: "8px 18px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500 }}
+                >
+                  Volgende: rapport
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* STAP 4: RAPPORT */}
+          {designStep === "rapport" && designInv && (
+            <>
+              <p style={{ fontSize: 13, ...muted, marginTop: 0, marginBottom: 20 }}>
+                Genereer een installatie-instructie voor de monteur: een optioneel legplan-plaatje, plus een tabel met
+                omvormer, MPPT, stringlabel en de verwachte Voc STC per string — te vergelijken met de stringmeting na aanleg.
+              </p>
+
+              <div
+                onPaste={handleReportImagePaste}
+                tabIndex={0}
+                style={{ ...card, marginBottom: 20, background: "var(--color-background-secondary)", border: "none" }}
+              >
+                <div style={label}>Legplan-plaatje (optioneel)</div>
+                {reportImage ? (
+                  <div>
+                    <img src={reportImage} alt="Legplan" style={{ maxWidth: "100%", borderRadius: "var(--border-radius-md)", marginBottom: 10 }} />
+                    <div>
+                      <button
+                        onClick={() => setReportImage(null)}
+                        style={{ padding: "5px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-danger)", fontSize: 12 }}
+                      >
+                        Verwijderen
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ fontSize: 13 }}>
+                    Klik hier en plak een screenshot vanuit Sollit (Cmd/Ctrl+V), of{" "}
+                    <label style={{ padding: "5px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-primary)", cursor: "pointer", fontSize: 12, display: "inline-block" }}>
+                      upload een bestand
+                      <input
+                        type="file"
+                        accept="image/*"
+                        style={{ display: "none" }}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          e.target.value = "";
+                          if (file) handleReportImageFile(file);
+                        }}
+                      />
+                    </label>
+                    .
+                  </div>
+                )}
+              </div>
+
+              <h3 style={{ fontSize: 16, fontWeight: 500, margin: "0 0 12px" }}>Omvormer / MPPT / string-overzicht</h3>
+              <div style={{ ...card, marginBottom: 24, overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
+                      <th style={{ padding: "6px 8px" }}>Omvormer</th>
+                      <th style={{ padding: "6px 8px" }}>MPPT</th>
+                      <th style={{ padding: "6px 8px" }}>String</th>
+                      <th style={{ padding: "6px 8px" }}>Aantal PV</th>
+                      <th style={{ padding: "6px 8px" }}>Wp</th>
+                      <th style={{ padding: "6px 8px" }}>Voc STC (V)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reportRows.map((r) => (
+                      <tr key={r.label} style={{ borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
+                        <td style={{ padding: "6px 8px" }}>{designInv.id}</td>
+                        <td style={{ padding: "6px 8px" }}>{r.mppt}</td>
+                        <td style={{ padding: "6px 8px", fontWeight: 500 }}>{r.label}</td>
+                        <td style={{ padding: "6px 8px" }}>{r.n}</td>
+                        <td style={{ padding: "6px 8px" }}>{r.wp}</td>
+                        <td style={{ padding: "6px 8px" }}>{r.vocStc.toFixed(1)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <div style={{ display: "flex", justifyContent: "space-between" }}>
+                <button onClick={() => setDesignStep("resultaat")} style={{ padding: "8px 18px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer" }}>
+                  Terug
+                </button>
+                <button
+                  onClick={generateReportPdf}
+                  disabled={reportRows.length === 0}
+                  style={{ padding: "8px 18px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: reportRows.length === 0 ? "default" : "pointer", fontWeight: 500, opacity: reportRows.length === 0 ? 0.5 : 1 }}
+                >
+                  PDF genereren
+                </button>
+              </div>
             </>
           )}
         </>

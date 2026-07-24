@@ -18,6 +18,8 @@
     "@neondatabase/neon-js": "^0.6.2-beta",
     "@neondatabase/serverless": "^1.1.0",
     "jose": "^6.2.4",
+    "jspdf": "^4.2.1",
+    "jspdf-autotable": "^5.0.8",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   }

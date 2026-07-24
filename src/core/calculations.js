@@ -56,6 +56,14 @@ export function vmpAtTemp(vmpStc, betaVocPct, tCell) {
   return vmpStc * (1 + (betaVocPct / 100) * (tCell - 25));
 }
 
+// Voc bij STC voor één string van n panelen — triviaal, maar hoort in de
+// rekenkern net als elke andere elektrische waarde waar een installatie-
+// advies (hier: een monteursinstructie met verwachte stringspanningen) op
+// gebaseerd wordt.
+export function stringVocStc(panel, n) {
+  return panel.voc * n;
+}
+
 // Bij welke celtemperatuur bereikt een string van N panelen de max. spanning?
 // Nuttig om de "grens-temperatuur" te tonen. Geeft °C terug.
 export function tempAtMaxVoltage(vocStc, betaVocPct, nPanels, vMax) {
