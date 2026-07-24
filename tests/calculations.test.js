@@ -17,8 +17,13 @@ import {
   findMatchingInverters,
   checkLegplanMulti,
   autoAssign,
+  autoAssignFleet,
   checkLegplan,
   distributeCounts,
+  buildStringsFromRoofFaces,
+  mpptCapacity,
+  totalMpptSlots,
+  minMpptCapacity,
   OVERDIM_MIN,
 } from "../src/core/calculations.js";
 
@@ -29,6 +34,12 @@ const JA430 = { id: "JAM54D41-430/GB", wp: 430, voc: 38.32, vmp: 32.21, isc: 14.
 const T20 = { id: "SMILE-G3-T20", vmax: 1000, vmpptMin: 200, vmpptMax: 850, imppt: 18, isc: 22.5, nMppt: 3, stringsPerMppt: 1, pmax: 40000, pacNom: 20000, iacMax: 32.0, isGoodwe: false };
 const SUN100 = { id: "SUN2000-100KTL-M2", vmax: 1100, vmpptMin: 200, vmpptMax: 1000, imppt: 30, isc: 40, nMppt: 10, stringsPerMppt: 2, pmax: 150000, pacNom: 100000, iacMax: 160.4, isGoodwe: false };
 const GW_SDT40 = { id: "GW40K-SDT-P30", vmax: 1100, vmpptMin: 140, vmpptMax: 1000, imppt: 40, isc: 56, nMppt: 4, stringsPerMppt: 2, pmax: 72000, pacNom: 40000, iacMax: 60.6, isGoodwe: true };
+
+// Asymmetrische omvormer: 2 MPPT's met ongelijke capaciteit — MPPT 1 kan
+// maar 1 string aan, MPPT 2 kan er 2 aan. Referentiecase: Bas kon dit soort
+// omvormer eerst niet invoeren omdat stringsPerMppt altijd één uniform getal
+// moest zijn (2026-07-24).
+const ASYM = { id: "ASYM-TEST-2K", vmax: 600, vmpptMin: 80, vmpptMax: 550, imppt: 30, isc: 32, nMppt: 2, stringsPerMppt: [1, 2], pmax: 20000, pacNom: 6000, iacMax: 15, isGoodwe: false };
 
 // --- Temperatuurcorrectie ---------------------------------------------------
 
@@ -194,6 +205,74 @@ test("checkLegplan werkt ook met een handmatig opgebouwde (niet-autoAssign) toew
   assert.equal(emptyMppt.pass, true, "een lege MPPT faalt niet");
 });
 
+// --- Asymmetrische MPPT-capaciteit (ongelijke trackers) ---------------------
+
+test("mpptCapacity/totalMpptSlots/minMpptCapacity: asymmetrische vs. uniforme omvormer", () => {
+  assert.equal(mpptCapacity(ASYM, 0), 1);
+  assert.equal(mpptCapacity(ASYM, 1), 2);
+  assert.equal(totalMpptSlots(ASYM), 3);
+  assert.equal(minMpptCapacity(ASYM), 1);
+  // Uniforme omvormers (scalar stringsPerMppt) blijven ongewijzigd werken.
+  assert.equal(mpptCapacity(T20, 0), 1);
+  assert.equal(totalMpptSlots(T20), 3);
+  assert.equal(minMpptCapacity(SUN100), 2);
+});
+
+test("checkLegplan: asymmetrische omvormer laat 2 strings toe op MPPT 2, niet op MPPT 1", () => {
+  const strings = [
+    { n: 10, panel: JA430, azimuth: 180 },
+    { n: 10, panel: JA430, azimuth: 180 },
+  ];
+  const badAssignment = { mppts: [[0, 1], []], overflow: false };
+  const badResult = checkLegplan(strings, ASYM, badAssignment, -10, 70);
+  const badStringsCheck = badResult.mpptResults[0].checks.find((c) => c.key === "strings");
+  assert.ok(!badStringsCheck.pass, "MPPT 1 mag maar 1 string aan");
+
+  const goodAssignment = { mppts: [[], [0, 1]], overflow: false };
+  const goodResult = checkLegplan(strings, ASYM, goodAssignment, -10, 70);
+  assert.ok(goodResult.pass, "MPPT 2 kan wel 2 strings aan");
+});
+
+test("autoAssign: vult de MPPT met capaciteit 1 eerst, de rest gaat naar de MPPT met capaciteit 2", () => {
+  const strings = Array.from({ length: 3 }, () => ({ n: 10, panel: JA430, azimuth: 180 }));
+  const result = autoAssign(strings, ASYM);
+  assert.equal(result.overflow, false);
+  assert.equal(result.mppts[0].length, 1, "MPPT 1 (capaciteit 1) mag er maar 1 krijgen");
+  assert.equal(result.mppts[1].length, 2, "de overige 2 gaan naar MPPT 2 (capaciteit 2)");
+});
+
+// --- Vloot van omvormer-eenheden (multi-omvormer, echte mix) -----------------
+
+test("autoAssignFleet: 2 eenheden van hetzelfde type — tweede pas gevuld als eerste vol is", () => {
+  const strings = Array.from({ length: 6 }, () => ({ n: 19, panel: JA430, azimuth: 180 }));
+  const units = [{ inverter: T20 }, { inverter: T20 }]; // elk 3 MPPT × 1 string/MPPT
+  const result = autoAssignFleet(strings, units);
+  assert.equal(result.overflow, false);
+  assert.equal(result.units[0].flat().length, 3, "eerste eenheid moet volledig gevuld raken (3 slots)");
+  assert.equal(result.units[1].flat().length, 3, "resterende 3 strings moeten op de tweede eenheid landen");
+  assert.deepEqual(result.units[0].flat().sort(), [0, 1, 2]);
+  assert.deepEqual(result.units[1].flat().sort(), [3, 4, 5]);
+});
+
+test("autoAssignFleet: echte mix van twee verschillende omvormertypen", () => {
+  // T20 (3 MPPT × 1 string) raakt vol, de rest loopt over naar de GW40K
+  // (4 MPPT × 2 strings) — ongeacht dat het een ander type is.
+  const strings = Array.from({ length: 5 }, () => ({ n: 19, panel: JA430, azimuth: 90 }));
+  const units = [{ inverter: T20 }, { inverter: GW_SDT40 }];
+  const result = autoAssignFleet(strings, units);
+  assert.equal(result.overflow, false);
+  assert.equal(result.units[0].flat().length, 3, "T20-eenheid moet vol raken (3 slots)");
+  assert.equal(result.units[1].flat().length, 2, "de overige 2 strings moeten op de GW40K-eenheid landen");
+  assert.deepEqual(result.units[1][0].sort(), [3, 4], "zelfde oriëntatie moet samen op één MPPT van de tweede eenheid komen");
+});
+
+test("autoAssignFleet: overflow wanneer de vloot te klein is voor het aantal strings", () => {
+  const strings = Array.from({ length: 4 }, () => ({ n: 19, panel: JA430, azimuth: 180 }));
+  const units = [{ inverter: T20 }]; // maar 3 slots
+  const result = autoAssignFleet(strings, units);
+  assert.equal(result.overflow, true, "4 strings passen niet op 3 slots");
+});
+
 // Referentiecase: 1252-panelen-project (LONGi 540 Wp / GoodWe SDT-C30),
 // besproken 2026-07-17. distributeCounts moet dezelfde stringverdeling geven
 // als het handmatige ontwerp: 111 panelen over 6 strings → 19/19/19/18/18/18.
@@ -207,4 +286,29 @@ test("distributeCounts: 102 panelen over 6 strings (Ameco-omvormer, exact deelba
 
 test("distributeCounts: 89 panelen over 6 strings (Emin Chicken-omvormer)", () => {
   assert.deepEqual(distributeCounts(89, 6), [15, 15, 15, 15, 15, 14]);
+});
+
+// --- Dakvlak → strings (Indeling: voorstel zonder vooraf bepaalde strings) --
+
+test("buildStringsFromRoofFaces: één dakvlak, 111 panelen bij 19 per string → 6 strings 19/19/19/18/18/18", () => {
+  const strings = buildStringsFromRoofFaces([{ count: 111, azimuth: 180, helling: 35 }], 19);
+  assert.deepEqual(strings.map((s) => s.n).sort((a, b) => b - a), [19, 19, 19, 18, 18, 18]);
+  assert.equal(strings.reduce((s, x) => s + x.n, 0), 111, "totaal aantal panelen moet behouden blijven");
+  assert.ok(strings.every((s) => s.azimuth === 180 && s.helling === 35), "azimuth/helling van het dakvlak moet op elke string staan");
+});
+
+test("buildStringsFromRoofFaces: meerdere dakvlakken worden onafhankelijk verdeeld", () => {
+  const strings = buildStringsFromRoofFaces(
+    [
+      { count: 40, azimuth: 90, helling: 10 },
+      { count: 21, azimuth: 270, helling: 10 },
+    ],
+    20
+  );
+  const az90 = strings.filter((s) => s.azimuth === 90);
+  const az270 = strings.filter((s) => s.azimuth === 270);
+  assert.equal(az90.reduce((s, x) => s + x.n, 0), 40);
+  assert.equal(az270.reduce((s, x) => s + x.n, 0), 21);
+  assert.deepEqual(az90.map((s) => s.n), [20, 20], "40 panelen bij 20/string past exact in 2 strings");
+  assert.equal(az270.length, 2, "21 panelen bij max 20/string moet 2 strings worden (11/10 of gelijkwaardig)");
 });

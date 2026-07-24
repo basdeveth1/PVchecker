@@ -1,0 +1,64 @@
+import Anthropic from "@anthropic-ai/sdk";
+import { requireUser } from "./_auth.js";
+
+const client = new Anthropic(); // ANTHROPIC_API_KEY uit env
+
+// Anders dan parse-stringplan.js: hier is er nog GEEN stringindeling, alleen
+// panelen per dakvlak/oriëntatie. Bewust een eigen, simpele prompt i.p.v. een
+// derde geval in de al twee-smakige stringplan-prompt te proppen — dat soort
+// dubbelzinnigheid leidde eerder al tot een dubbeltelling.
+const PROMPT = `Lees dit dakvlak-overzicht. Er is nog GEEN stringindeling gemaakt — alleen het aantal panelen per dakvlak/oriëntatie.
+Geef een JSON-array: [{ "count": <aantal panelen op dit dakvlak>, "azimuth": <graden, 0-359>, "helling": <graden, 0-90> }, ...]
+Eén object per dakvlak/oriëntatie-groep. Geef alleen JSON terug, geen markdown, geen uitleg.
+Als je een veld niet zeker kan lezen, zet de waarde op null — gok niet.`;
+
+export default async function handler(req, res) {
+  const user = await requireUser(req, res);
+  if (!user) return;
+  if (req.method !== "POST") {
+    res.status(405).json({ error: "Method not allowed" });
+    return;
+  }
+
+  const { imageBase64, mediaType } = req.body || {};
+  if (!imageBase64 || !mediaType) {
+    res.status(400).json({ error: "imageBase64 en mediaType zijn verplicht." });
+    return;
+  }
+  if (!process.env.ANTHROPIC_API_KEY) {
+    res.status(500).json({ error: "ANTHROPIC_API_KEY ontbreekt op de server." });
+    return;
+  }
+
+  let text;
+  try {
+    const msg = await client.messages.create({
+      model: process.env.ANTHROPIC_VISION_MODEL || "claude-sonnet-5",
+      max_tokens: 1024,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image", source: { type: "base64", media_type: mediaType, data: imageBase64 } },
+            { type: "text", text: PROMPT },
+          ],
+        },
+      ],
+    });
+    text = msg.content.map((b) => b.text || "").join("");
+  } catch (e) {
+    res.status(502).json({ error: `Vision-model aanroepen mislukt: ${e.message}` });
+    return;
+  }
+
+  let roofFaces;
+  try {
+    roofFaces = JSON.parse(text.replace(/```json|```/g, "").trim());
+    if (!Array.isArray(roofFaces)) throw new Error("geen array");
+  } catch {
+    res.status(502).json({ error: "Kon de screenshot niet als dakvlak-overzicht lezen. Probeer opnieuw of vul handmatig in.", raw: text });
+    return;
+  }
+
+  res.status(200).json({ roofFaces });
+}

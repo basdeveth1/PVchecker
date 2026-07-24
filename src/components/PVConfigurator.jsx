@@ -9,8 +9,12 @@ import {
   inverterFitsConnection,
   findMatchingInverters,
   autoAssign,
+  autoAssignFleet,
   checkLegplan,
   stringVocStc,
+  buildStringsFromRoofFaces,
+  OVERDIM_MIN,
+  OVERDIM_MAX,
 } from "../core/calculations.js";
 
 // ============================================================================
@@ -68,6 +72,19 @@ const INVERTER_VARIANT_FIELDS = [
   { key: "pacNom", label: "Pac nom (W)" },
   { key: "iacMax", label: "Iac max (A)", step: "0.1" },
 ];
+
+// stringsPerMppt is meestal één getal; bij "Ongelijke MPPT's" is het invoerveld
+// een array van ruwe stringwaarden (één per MPPT). Zet dat om naar wat de
+// rekenkern verwacht (zie mpptCapacity/totalMpptSlots/minMpptCapacity in
+// calculations.js): een array bij echt ongelijke waarden, anders het gedeelde
+// getal — zo blijft de database consistent met alle bestaande, uniforme
+// omvormers.
+function resolveStringsPerMppt(raw) {
+  if (!Array.isArray(raw)) return raw === undefined || raw === "" ? { ok: false } : { ok: true, value: Number(raw) };
+  if (raw.length === 0 || raw.some((v) => v === undefined || v === "")) return { ok: false };
+  const nums = raw.map(Number);
+  return { ok: true, value: nums.every((x) => x === nums[0]) ? nums[0] : nums };
+}
 
 // Zoekt bij een uit een screenshot geëxtraheerde string ({ wp, fabrikant })
 // de bijpassende database-variant. Eén match → gebruiken; 0 of >1 → aan de
@@ -184,9 +201,21 @@ export default function PVConfigurator() {
     { n: 19, panelId: "JAM54D41-430/GB", azimuth: 142, helling: 5 },
     { n: 19, panelId: "JAM54D41-430/GB", azimuth: 142, helling: 5 },
   ]);
-  const [designInvId, setDesignInvId] = useState("SUN2000-20K-MB0");
+  // Omvormerpark: lijst van { inverterId, count } — ondersteunt een echte mix
+  // van verschillende typen, uitgeklapt tot genummerde eenheden (designUnits).
+  const [designFleet, setDesignFleet] = useState([{ inverterId: "SUN2000-20K-MB0", count: 1 }]);
   const [designAssignMode, setDesignAssignMode] = useState("auto"); // "auto" | "manual"
-  const [designManualAssign, setDesignManualAssign] = useState(null); // [[idx,...], ...] per MPPT
+  const [designManualAssign, setDesignManualAssign] = useState(null); // [unitIdx][mpptIdx] = [stringIdx,...]
+
+  // Indeling: voorstel voor stringverdeling + omvormer uit een ruw legplan
+  // (dakvlakken zonder vooraf bepaalde strings) — vult designStrings/designFleet
+  // pas na expliciete "Toepassen", net als de andere extractiestromen.
+  const [roofFaces, setRoofFaces] = useState([{ count: 76, azimuth: 180, helling: 35 }]);
+  const [roofPanelId, setRoofPanelId] = useState("JAM54D41-430/GB");
+  const [roofFixedInvCount, setRoofFixedInvCount] = useState(""); // "" = automatisch optimaliseren
+  const [roofImportBusy, setRoofImportBusy] = useState(false);
+  const [roofImportError, setRoofImportError] = useState(null);
+  const [roofMatches, setRoofMatches] = useState(null); // null tot "Voorstel genereren"
 
   // Rapport-stap: optioneel legplan-screenshot (dataURL) voor in de
   // monteurs-PDF — puur ter illustratie, wordt niet uitgelezen/geëxtraheerd.
@@ -221,6 +250,10 @@ export default function PVConfigurator() {
   const [addNote, setAddNote] = useState("");
   const [addVariant, setAddVariant] = useState({});
   const [addStatus, setAddStatus] = useState(null);
+  // "Ongelijke MPPT's": toont per MPPT een los invoerveld voor Strings/MPPT
+  // i.p.v. één uniform getal — voor omvormers met trackers die niet allemaal
+  // evenveel strings aankunnen (bijv. 1 op MPPT 1, 2 op MPPT 2).
+  const [addAsymmetricMppt, setAddAsymmetricMppt] = useState(false);
   const customFetchStarted = useRef(false);
 
   // Datasheet-upload: extractie ter bevestiging, nooit direct toegepast (zie
@@ -260,41 +293,111 @@ export default function PVConfigurator() {
       })),
     [designStrings, availPanels]
   );
-  const designInv = availInverters.find((i) => i.id === designInvId) || availInverters[0];
-
-  const designAssignment = useMemo(() => {
-    if (!designInv) return { mppts: [], overflow: false };
-    if (designAssignMode === "manual" && designManualAssign) {
-      const m = Array.from({ length: designInv.nMppt }, (_, i) => designManualAssign[i] || []);
-      return { mppts: m, overflow: designStrings.length !== m.flat().length };
+  // Vloot uitklappen tot individuele, doorlopend genummerde eenheden — mag
+  // meerdere typen mixen (bijv. 3× GW40K + 1× GW33K wordt eenheid 1-3-4).
+  const designUnits = useMemo(() => {
+    const list = [];
+    let n = 1;
+    for (const row of designFleet) {
+      const inverter = availInverters.find((i) => i.id === row.inverterId) || availInverters[0];
+      if (!inverter) continue;
+      for (let k = 0; k < row.count; k++) list.push({ unitNumber: n++, inverterId: inverter.id, inverter });
     }
-    return autoAssign(designStringsResolved, designInv);
-  }, [designAssignMode, designManualAssign, designStringsResolved, designInv, designStrings.length]);
+    return list;
+  }, [designFleet, availInverters]);
 
-  const designResult = useMemo(() => {
-    if (!designInv || designStringsResolved.length === 0) return null;
-    return checkLegplan(designStringsResolved, designInv, designAssignment, tMinCold, tMaxHot);
-  }, [designInv, designStringsResolved, designAssignment, tMinCold, tMaxHot]);
+  const designFleetAssignment = useMemo(() => {
+    if (designUnits.length === 0) return { units: [], overflow: false };
+    if (designAssignMode === "manual" && designManualAssign) {
+      const units = designUnits.map((u, uIdx) => {
+        const perUnit = designManualAssign[uIdx] || [];
+        return Array.from({ length: u.inverter.nMppt }, (_, mIdx) => perUnit[mIdx] || []);
+      });
+      return { units, overflow: designStrings.length !== units.flat(2).length };
+    }
+    return autoAssignFleet(designStringsResolved, designUnits);
+  }, [designAssignMode, designManualAssign, designStringsResolved, designUnits, designStrings.length]);
 
-  // Rapport voor de monteur: label = omvormer.mppt.string (omvormer altijd
-  // "1" zolang de tool één omvormer per ontwerp ondersteunt) + Voc STC per
-  // string, zodat een stringmeting na aanleg vergeleken kan worden.
+  // checkLegplan blijft ongewijzigd, gewoon één keer per eenheid aangeroepen —
+  // maar wel met alleen déze eenheid se eigen strings (lokaal herindexeerd),
+  // anders zou checkLegplans systeem-brede totalWp/powerOk/allAssigned per
+  // eenheid het totaal van de HELE vloot vergelijken met de limiet van één
+  // eenheid.
+  const designFleetResults = useMemo(() => {
+    if (designUnits.length === 0 || designStringsResolved.length === 0) return [];
+    return designUnits.map((unit, uIdx) => {
+      const unitMppts = designFleetAssignment.units[uIdx] || [];
+      const globalIdxs = unitMppts.flat();
+      const unitStrings = globalIdxs.map((gi) => designStringsResolved[gi]);
+      const localIndexOf = new Map(globalIdxs.map((gi, li) => [gi, li]));
+      const localMppts = unitMppts.map((idxs) => idxs.map((gi) => localIndexOf.get(gi)));
+      const result = checkLegplan(unitStrings, unit.inverter, { mppts: localMppts, overflow: false }, tMinCold, tMaxHot);
+      return { unit, result };
+    });
+  }, [designUnits, designStringsResolved, designFleetAssignment, tMinCold, tMaxHot]);
+
+  // DC/AC-overdimensionering per omvormerpark-rij (type + aantal), op basis
+  // van het Wp dat op dit moment daadwerkelijk aan die eenheden toegewezen is
+  // — zelfde weergave als "Omvormer zoeken", maar dan per rij in de vloot.
+  const designFleetRowStats = useMemo(() => {
+    const stats = [];
+    let uIdx = 0;
+    for (const row of designFleet) {
+      let assignedWp = 0;
+      for (let k = 0; k < row.count; k++) {
+        const mppts = designFleetAssignment.units[uIdx + k] || [];
+        for (const stringIdxs of mppts) {
+          for (const si of stringIdxs) {
+            const s = designStringsResolved[si];
+            if (s) assignedWp += s.n * s.panel.wp;
+          }
+        }
+      }
+      const inverter = designUnits[uIdx]?.inverter;
+      const totalAc = inverter ? inverter.pacNom * row.count : 0;
+      const dcAcRatio = totalAc > 0 ? assignedWp / totalAc : null;
+      stats.push({
+        assignedWp,
+        totalAc,
+        dcAcRatio,
+        inBand: dcAcRatio !== null && dcAcRatio >= OVERDIM_MIN && dcAcRatio <= OVERDIM_MAX,
+        highOverdim: dcAcRatio !== null && dcAcRatio > OVERDIM_MAX,
+      });
+      uIdx += row.count;
+    }
+    return stats;
+  }, [designFleet, designUnits, designFleetAssignment, designStringsResolved]);
+
+  const designFleetPass = designFleetResults.length > 0 && !designFleetAssignment.overflow && designFleetResults.every((r) => r.result.pass);
+  const designAnyMixed = designFleetResults.some((r) => r.result.anyMixed);
+  const designAnyPowerNotOk = designFleetResults.some((r) => !r.result.powerOk);
+  const designTotalWp = designStringsResolved.reduce((s, x) => s + x.n * x.panel.wp, 0);
+  const totalIacMax = designUnits.reduce((sum, u) => sum + u.inverter.iacMax, 0);
+  const fleetFitsConn = designUnits.length === 0 || inverterFitsConnection(totalIacMax, conn.amps);
+
+  // Rapport voor de monteur: label = omvormer.mppt.string, omvormer-cijfer =
+  // het doorlopende eenheidsnummer uit designUnits, + Voc STC per string.
   const reportRows = useMemo(() => {
-    if (!designAssignment.mppts.length) return [];
-    return designAssignment.mppts.flatMap((stringIdxs, mIdx) =>
-      stringIdxs.map((si, sIdxInMppt) => {
-        const s = designStringsResolved[si];
-        return {
-          label: `1.${mIdx + 1}.${sIdxInMppt + 1}`,
-          mppt: mIdx + 1,
-          n: s.n,
-          panelId: s.panelId,
-          wp: s.panel.wp,
-          vocStc: stringVocStc(s.panel, s.n),
-        };
-      })
-    );
-  }, [designAssignment, designStringsResolved]);
+    if (!designFleetAssignment.units.length) return [];
+    return designFleetAssignment.units.flatMap((mppts, uIdx) => {
+      const unit = designUnits[uIdx];
+      return mppts.flatMap((stringIdxs, mIdx) =>
+        stringIdxs.map((si, sIdxInMppt) => {
+          const s = designStringsResolved[si];
+          return {
+            label: `${unit.unitNumber}.${mIdx + 1}.${sIdxInMppt + 1}`,
+            unitNumber: unit.unitNumber,
+            inverterId: unit.inverterId,
+            mppt: mIdx + 1,
+            n: s.n,
+            panelId: s.panelId,
+            wp: s.panel.wp,
+            vocStc: stringVocStc(s.panel, s.n),
+          };
+        })
+      );
+    });
+  }, [designFleetAssignment, designUnits, designStringsResolved]);
 
   async function handleReportImageFile(file) {
     const dataUrl = await new Promise((resolve, reject) => {
@@ -315,7 +418,7 @@ export default function PVConfigurator() {
   }
 
   function generateReportPdf() {
-    if (!designInv || reportRows.length === 0) return;
+    if (reportRows.length === 0) return;
     const doc = new jsPDF();
     const pageWidth = doc.internal.pageSize.getWidth();
     doc.setFontSize(14);
@@ -331,7 +434,7 @@ export default function PVConfigurator() {
     autoTable(doc, {
       startY: y,
       head: [["Omvormer", "MPPT", "String", "Aantal PV", "Wp", "Voc STC (V)"]],
-      body: reportRows.map((r) => [designInv.id, r.mppt, r.label, r.n, r.wp, r.vocStc.toFixed(1)]),
+      body: reportRows.map((r) => [`${r.inverterId} (#${r.unitNumber})`, r.mppt, r.label, r.n, r.wp, r.vocStc.toFixed(1)]),
     });
     doc.setFontSize(9);
     doc.setTextColor(120);
@@ -358,7 +461,7 @@ export default function PVConfigurator() {
       return;
     }
     try {
-      const payload = { strings: designStrings, inverterId: designInvId, assignMode: designAssignMode, manualAssign: designManualAssign, tMinCold, tMaxHot, connId };
+      const payload = { strings: designStrings, fleet: designFleet, assignMode: designAssignMode, manualAssign: designManualAssign, tMinCold, tMaxHot, connId };
       await apiFetch("/api/configs", {
         method: "POST",
         body: JSON.stringify({ name: saveName.trim(), sollitId: saveSollitId.trim(), payload }),
@@ -378,9 +481,16 @@ export default function PVConfigurator() {
       const data = await apiFetch(`/api/configs/${id}`);
       const p = data.config.payload;
       setDesignStrings(p.strings);
-      setDesignInvId(p.inverterId);
+      if (p.fleet) {
+        setDesignFleet(p.fleet);
+        setDesignManualAssign(p.manualAssign || null);
+      } else {
+        // Oud formaat: precies één omvormer, geen vloot — normaliseren bij
+        // het laden, geen DB-migratie nodig.
+        setDesignFleet([{ inverterId: p.inverterId, count: 1 }]);
+        setDesignManualAssign(p.manualAssign ? [p.manualAssign] : null);
+      }
       setDesignAssignMode(p.assignMode || "auto");
-      setDesignManualAssign(p.manualAssign || null);
       setTMinCold(p.tMinCold);
       setTMaxHot(p.tMaxHot);
       setConnId(p.connId);
@@ -406,18 +516,95 @@ export default function PVConfigurator() {
     setDesignStrings((prev) => prev.filter((_, i) => i !== idx));
     setDesignManualAssign(null);
   }
-  function assignToMppt(stringIdx, mpptIdx) {
+  function assignToMppt(stringIdx, unitIdx, mpptIdx) {
     setDesignAssignMode("manual");
     setDesignManualAssign((prev) => {
-      const base = prev ? prev.map((a) => [...a]) : Array.from({ length: designInv.nMppt }, () => []);
-      // verwijder string overal
-      for (const arr of base) {
-        const p = arr.indexOf(stringIdx);
-        if (p !== -1) arr.splice(p, 1);
+      const base = prev
+        ? prev.map((u) => u.map((arr) => [...arr]))
+        : designUnits.map((u) => Array.from({ length: u.inverter.nMppt }, () => []));
+      // verwijder string overal, op elke eenheid
+      for (const unitArr of base) {
+        for (const arr of unitArr) {
+          const p = arr.indexOf(stringIdx);
+          if (p !== -1) arr.splice(p, 1);
+        }
       }
-      if (mpptIdx >= 0) base[mpptIdx].push(stringIdx);
+      if (unitIdx >= 0 && mpptIdx >= 0) base[unitIdx][mpptIdx].push(stringIdx);
       return base;
     });
+  }
+
+  function addFleetRow() {
+    setDesignFleet((prev) => [...prev, { inverterId: availInverters[0].id, count: 1 }]);
+    setDesignManualAssign(null);
+  }
+  function updateFleetRow(idx, field, value) {
+    setDesignFleet((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
+    setDesignManualAssign(null);
+  }
+  function removeFleetRow(idx) {
+    setDesignFleet((prev) => prev.filter((_, i) => i !== idx));
+    setDesignManualAssign(null);
+  }
+
+  function updateRoofFace(idx, field, value) {
+    setRoofFaces((prev) => prev.map((f, i) => (i === idx ? { ...f, [field]: value } : f)));
+    setRoofMatches(null);
+  }
+  function addRoofFace() {
+    setRoofFaces((prev) => [...prev, { count: 20, azimuth: 180, helling: 35 }]);
+    setRoofMatches(null);
+  }
+  function removeRoofFace(idx) {
+    setRoofFaces((prev) => prev.filter((_, i) => i !== idx));
+    setRoofMatches(null);
+  }
+
+  // Screenshot → base64 → /api/parse-roofplan → vult de dakvlak-tabel. Zelfde
+  // "nooit direct toepassen"-principe als de andere extractiestromen: dit
+  // vult alleen de tabel, "Voorstel genereren" moet nog expliciet.
+  async function handleRoofplanUpload(file) {
+    setRoofImportError(null);
+    setRoofImportBusy(true);
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const [, mediaType, base64] = dataUrl.match(/^data:(.+);base64,(.*)$/) || [];
+      if (!base64) throw new Error("Kon het bestand niet lezen.");
+      const data = await apiFetch("/api/parse-roofplan", {
+        method: "POST",
+        body: JSON.stringify({ imageBase64: base64, mediaType }),
+      });
+      setRoofFaces(data.roofFaces.map((f) => ({ count: f.count ?? 1, azimuth: f.azimuth ?? 180, helling: f.helling ?? 35 })));
+      setRoofMatches(null);
+    } catch (e) {
+      setRoofImportError(e.message);
+    } finally {
+      setRoofImportBusy(false);
+    }
+  }
+
+  // Zoekt, gegeven de dakvlakken en één gedeeld paneeltype, het best passende
+  // omvormertype — hergebruikt findMatchingInverters ongewijzigd (bekijkt het
+  // totaal aantal panelen, niet de dakvlak-indeling zelf).
+  function generateRoofSuggestion() {
+    const panel = availPanels.find((p) => p.id === roofPanelId) || availPanels[0];
+    const totalPanels = roofFaces.reduce((s, f) => s + (+f.count || 0), 0);
+    const fixedInvCount = roofFixedInvCount ? Math.max(1, +roofFixedInvCount) : undefined;
+    setRoofMatches(findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters: availInverters, fixedInvCount }));
+  }
+
+  function applyRoofSuggestion(match) {
+    const strings = buildStringsFromRoofFaces(roofFaces, match.nPerString).map((s) => ({ ...s, panelId: roofPanelId }));
+    setDesignStrings(strings);
+    setDesignFleet([{ inverterId: match.inverter.id, count: match.invCount }]);
+    setDesignManualAssign(null);
+    setDesignAssignMode("auto");
+    setRoofMatches(null);
   }
 
   // Vrije vraag/antwoord: stuurt de hele gespreksgeschiedenis + de huidige
@@ -441,7 +628,10 @@ export default function PVConfigurator() {
           inverters: availInverters,
           tMinCold,
           tMaxHot,
-          currentDesign: designStrings.length > 0 ? { strings: designStrings, inverterId: designInv?.id } : null,
+          // De agent is voorlopig single-inverter — bij een echte vloot (>1
+          // eenheid) sturen we geen currentDesign mee, zodat de agent niet
+          // doet alsof hij een mix kent die hij niet kan doorrekenen.
+          currentDesign: designStrings.length > 0 && designUnits.length === 1 ? { strings: designStrings, inverterId: designUnits[0].inverterId } : null,
         }),
       });
       setChatMessages((prev) => [...prev, { role: "assistant", content: data.reply, toolCalls: data.toolCalls }]);
@@ -467,7 +657,9 @@ export default function PVConfigurator() {
     return null;
   }
   function applyAgentAssignment(mppts) {
-    setDesignManualAssign(mppts);
+    // De agent kent alleen het 1-eenheid-geval (zie sendChatMessage) — de
+    // voorgestelde mppts zijn dus altijd voor designUnits[0].
+    setDesignManualAssign([mppts]);
     setDesignAssignMode("manual");
     setMode("design");
     setDesignStep("resultaat");
@@ -557,6 +749,15 @@ export default function PVConfigurator() {
     const fields = addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS;
     const variant = {};
     for (const f of fields) {
+      if (f.key === "stringsPerMppt" && addType === "inverter") {
+        const res = resolveStringsPerMppt(addVariant[f.key]);
+        if (!res.ok) {
+          setAddStatus({ type: "error", message: `Veld "${f.label}" is verplicht voor elke MPPT.` });
+          return;
+        }
+        variant.stringsPerMppt = res.value;
+        continue;
+      }
       const raw = addVariant[f.key];
       if (raw === undefined || raw === "") {
         setAddStatus({ type: "error", message: `Veld "${f.label}" is verplicht.` });
@@ -579,6 +780,7 @@ export default function PVConfigurator() {
       await postComponent({ type: addType, familyName: addFamilyName.trim(), isNewFamily, familyMeta, variant });
       setAddStatus({ type: "ok", message: `Toegevoegd — nog niet gecontroleerd tegen de datasheet.` });
       setAddVariant({});
+      setAddAsymmetricMppt(false);
       if (isNewFamily) {
         setAddFamilyName("");
         setAddBetaVoc("");
@@ -588,6 +790,21 @@ export default function PVConfigurator() {
     } catch (e) {
       setAddStatus({ type: "error", message: e.message });
     }
+  }
+
+  // Aan: array van `n` losse vakjes, gevuld met het huidige uniforme getal.
+  // Uit: terug naar één getal (de eerste waarde die al was ingevuld).
+  function toggleAddAsymmetric() {
+    const n = Math.max(1, Math.min(20, Math.round(Number(addVariant.nMppt)) || 1));
+    setAddAsymmetricMppt((prev) => {
+      const next = !prev;
+      setAddVariant((v) => {
+        if (next) return { ...v, stringsPerMppt: Array.from({ length: n }, () => v.stringsPerMppt ?? "") };
+        const arr = Array.isArray(v.stringsPerMppt) ? v.stringsPerMppt : [];
+        return { ...v, stringsPerMppt: arr[0] ?? "" };
+      });
+      return next;
+    });
   }
 
   // Datasheet → base64 → /api/parse-datasheet → bevestigingstabel met (vaak
@@ -616,6 +833,10 @@ export default function PVConfigurator() {
       const rows = data.variants.map((v) => {
         const row = { include: true, iacMaxComputed: addType === "inverter" && !!v.iacMaxComputed };
         for (const f of fields) row[f.key] = v[f.key] ?? "";
+        // Als het vision-model al een array teruggaf (ongelijke MPPT's in de
+        // datasheet gezien), meteen de per-MPPT-invoer tonen i.p.v. dat de
+        // gebruiker het eerst handmatig moet omzetten.
+        if (addType === "inverter" && Array.isArray(v.stringsPerMppt)) row.asymmetricMppt = true;
         return row;
       });
       setDatasheetDraft({
@@ -641,6 +862,35 @@ export default function PVConfigurator() {
   }
   function toggleDatasheetRow(idx) {
     setDatasheetDraft((prev) => ({ ...prev, rows: prev.rows.map((r, i) => (i !== idx ? r : { ...r, include: !r.include })) }));
+  }
+  // Zelfde "Ongelijke MPPT's"-toggle als het handmatige formulier, maar per
+  // rij — een datasheet kan meerdere vermogensklassen bevatten die niet per
+  // se allemaal dezelfde MPPT-indeling hebben.
+  function toggleDatasheetRowAsymmetric(idx) {
+    setDatasheetDraft((prev) => ({
+      ...prev,
+      rows: prev.rows.map((r, i) => {
+        if (i !== idx) return r;
+        const n = Math.max(1, Math.min(20, Math.round(Number(r.nMppt)) || 1));
+        const next = !r.asymmetricMppt;
+        if (next) return { ...r, asymmetricMppt: true, stringsPerMppt: Array.from({ length: n }, () => r.stringsPerMppt ?? "") };
+        const arr = Array.isArray(r.stringsPerMppt) ? r.stringsPerMppt : [];
+        return { ...r, asymmetricMppt: false, stringsPerMppt: arr[0] ?? "" };
+      }),
+    }));
+  }
+  function updateDatasheetRowMppt(idx, mIdx, value) {
+    setDatasheetDraft((prev) => ({
+      ...prev,
+      rows: prev.rows.map((r, i) => {
+        if (i !== idx) return r;
+        const n = Math.max(1, Math.min(20, Math.round(Number(r.nMppt)) || 1));
+        const arr = Array.isArray(r.stringsPerMppt) ? [...r.stringsPerMppt] : Array.from({ length: n }, () => "");
+        arr.length = n;
+        arr[mIdx] = value;
+        return { ...r, stringsPerMppt: arr };
+      }),
+    }));
   }
 
   async function applyDatasheetDraft() {
@@ -671,6 +921,15 @@ export default function PVConfigurator() {
       const variant = {};
       let rowOk = true;
       for (const f of fields) {
+        if (f.key === "stringsPerMppt" && addType === "inverter") {
+          const res = resolveStringsPerMppt(r[f.key]);
+          if (!res.ok) {
+            rowOk = false;
+            break;
+          }
+          variant.stringsPerMppt = res.value;
+          continue;
+        }
         if (r[f.key] === undefined || r[f.key] === "") {
           rowOk = false;
           break;
@@ -1068,33 +1327,189 @@ export default function PVConfigurator() {
               <div style={{ display: "flex", justifyContent: "flex-end" }}>
                 <button
                   onClick={() => setDesignStep("indeling")}
-                  disabled={designStrings.length === 0}
-                  style={{ padding: "8px 18px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: designStrings.length === 0 ? "default" : "pointer", fontWeight: 500, opacity: designStrings.length === 0 ? 0.5 : 1 }}
+                  style={{ padding: "8px 18px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500 }}
                 >
                   Volgende: indeling
                 </button>
               </div>
+              {designStrings.length === 0 && (
+                <div style={{ fontSize: 12, ...muted, marginTop: 8, textAlign: "right" }}>
+                  Nog geen strings? In Indeling kun je ook een dakvlak-voorstel laten genereren.
+                </div>
+              )}
             </>
           )}
 
           {/* STAP 2: INDELING */}
-          {designStep === "indeling" && designInv && (
+          {designStep === "indeling" && designUnits.length > 0 && (
             <>
+              <div style={{ ...card, marginBottom: 20, background: "var(--color-background-secondary)", border: "none" }}>
+                <div style={{ fontWeight: 500, marginBottom: 4 }}>Nog geen stringverdeling? Laat een voorstel doen.</div>
+                <div style={{ fontSize: 12, ...muted, marginBottom: 14 }}>
+                  Voer de dakvlakken in (aantal panelen + azimuth + helling, nog geen strings) — ik stel een stringverdeling en een passende omvormer voor.
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 14 }}>
+                  <div>
+                    <div style={label}>Paneeltype</div>
+                    <select value={roofPanelId} onChange={(e) => { setRoofPanelId(e.target.value); setRoofMatches(null); }} style={{ width: "100%" }}>
+                      {availPanels.map((p) => (
+                        <option key={p.id} value={p.id}>{p.id} — {p.wp} Wp{p.label ? ` · ${p.label}` : ""}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <div style={label}>Aantal omvormers (optioneel)</div>
+                    <input
+                      type="number"
+                      min={1}
+                      step={1}
+                      value={roofFixedInvCount}
+                      onChange={(e) => { setRoofFixedInvCount(e.target.value); setRoofMatches(null); }}
+                      placeholder="automatisch"
+                      style={{ width: "100%" }}
+                    />
+                  </div>
+                </div>
+
+                <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>
+                  {roofFaces.map((f, idx) => (
+                    <div key={idx} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ fontSize: 12, ...muted }}>Aantal</span>
+                        <input type="number" min={1} value={f.count} onChange={(e) => updateRoofFace(idx, "count", +e.target.value)} style={{ width: 70 }} />
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ fontSize: 12, ...muted }}>Az</span>
+                        <input type="number" min={0} max={359} value={f.azimuth} onChange={(e) => updateRoofFace(idx, "azimuth", +e.target.value)} style={{ width: 60 }} />°
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ fontSize: 12, ...muted }}>Hel</span>
+                        <input type="number" min={0} max={90} value={f.helling} onChange={(e) => updateRoofFace(idx, "helling", +e.target.value)} style={{ width: 50 }} />°
+                      </div>
+                      <button
+                        onClick={() => removeRoofFace(idx)}
+                        disabled={roofFaces.length === 1}
+                        aria-label="verwijder dakvlak"
+                        style={{ padding: "4px 8px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: roofFaces.length === 1 ? "default" : "pointer", color: "var(--color-text-danger)", opacity: roofFaces.length === 1 ? 0.4 : 1 }}
+                      >
+                        <i className="ti ti-trash" style={{ fontSize: 14 }} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+                  <button onClick={addRoofFace} style={{ fontSize: 12, padding: "5px 10px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-primary)" }}>
+                    <i className="ti ti-plus" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} /> Dakvlak toevoegen
+                  </button>
+                  <label style={{ fontSize: 12, padding: "5px 10px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-primary)", cursor: "pointer" }}>
+                    {roofImportBusy ? "Bezig met lezen…" : "Dakvlak-screenshot uploaden"}
+                    <input
+                      type="file"
+                      accept="image/*"
+                      style={{ display: "none" }}
+                      disabled={roofImportBusy}
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        e.target.value = "";
+                        if (file) handleRoofplanUpload(file);
+                      }}
+                    />
+                  </label>
+                  <button
+                    onClick={generateRoofSuggestion}
+                    style={{ fontSize: 12, padding: "5px 10px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500 }}
+                  >
+                    Voorstel genereren
+                  </button>
+                </div>
+                {roofImportError && <div style={{ fontSize: 12, color: "var(--color-text-danger)", marginBottom: 10 }}>{roofImportError}</div>}
+
+                {roofMatches && (
+                  roofMatches.length === 0 ? (
+                    <div style={{ fontSize: 13, ...muted }}>
+                      Geen enkele beschikbare omvormer past dit aantal panelen{roofFixedInvCount ? ` op precies ${roofFixedInvCount} omvormer(s)` : ""} binnen de grenzen bij {tMinCold}°C.
+                    </div>
+                  ) : (
+                    <div style={{ display: "grid", gap: 10 }}>
+                      {roofMatches.slice(0, 3).map((m, i) => (
+                        <div key={m.inverter.id} style={{ ...card, border: i === 0 ? "2px solid var(--color-border-info)" : card.border }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
+                            <div>
+                              <span style={{ fontWeight: 500, fontSize: 15 }}>{m.invCount > 1 ? `${m.invCount}× ` : ""}{m.inverter.id}</span>
+                              {m.inverter.isGoodwe && <span style={{ background: "var(--color-background-info)", color: "var(--color-text-info)", fontSize: 11, padding: "2px 8px", borderRadius: "var(--border-radius-md)", marginLeft: 8 }}>GoodWe</span>}
+                            </div>
+                            {i === 0 && <span style={{ background: "var(--color-background-info)", color: "var(--color-text-info)", fontSize: 12, padding: "3px 10px", borderRadius: "var(--border-radius-md)" }}>Beste match</span>}
+                          </div>
+                          <div style={{ fontSize: 13, marginTop: 8 }}>
+                            {m.stringsTotal} strings × {m.nPerString} panelen · {(m.totalWp / 1000).toFixed(1)} kWp op {(m.totalAc / 1000).toFixed(1)} kW AC
+                          </div>
+                          <div style={{ fontSize: 13, marginTop: 4 }}>
+                            <span style={muted}>Overdimensionering: </span>
+                            <b style={{ color: m.highOverdim ? "var(--color-text-warning)" : "var(--color-text-primary)" }}>{(m.dcAcRatio * 100).toFixed(0)}%</b>
+                          </div>
+                          <button
+                            onClick={() => applyRoofSuggestion(m)}
+                            style={{ marginTop: 10, padding: "6px 14px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500, fontSize: 12 }}
+                          >
+                            Toepassen
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )
+                )}
+              </div>
+
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 28 }}>
                 <div style={card}>
-                  <div style={label}>Omvormer om te checken</div>
-                  <select value={designInvId} onChange={(e) => { setDesignInvId(e.target.value); setDesignManualAssign(null); }} style={{ width: "100%", marginBottom: 8 }}>
-                    {availInverters.map((i) => (
-                      <option key={i.id} value={i.id}>{i.id}{i.label ? ` · ${i.label}` : ""}</option>
-                    ))}
-                  </select>
-                  {designInv.label && (
-                    <span style={{ fontSize: 11, background: "var(--color-background-info)", color: "var(--color-text-info)", padding: "2px 8px", borderRadius: "var(--border-radius-md)", display: "inline-block", marginBottom: 6 }}>
-                      {designInv.label}
-                    </span>
-                  )}
+                  <div style={label}>Omvormerpark</div>
+                  <div style={{ display: "grid", gap: 8, marginBottom: 8 }}>
+                    {designFleet.map((row, idx) => {
+                      const stat = designFleetRowStats[idx];
+                      return (
+                        <div key={idx} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                            <select value={row.inverterId} onChange={(e) => updateFleetRow(idx, "inverterId", e.target.value)} style={{ flex: 1, minWidth: 0 }}>
+                              {availInverters.map((i) => (
+                                <option key={i.id} value={i.id}>{i.id}{i.label ? ` · ${i.label}` : ""}</option>
+                              ))}
+                            </select>
+                            <span style={{ fontSize: 12, ...muted }}>×</span>
+                            <input
+                              type="number"
+                              min={1}
+                              value={row.count}
+                              onChange={(e) => updateFleetRow(idx, "count", Math.max(1, +e.target.value))}
+                              style={{ width: 52 }}
+                            />
+                            <button
+                              onClick={() => removeFleetRow(idx)}
+                              disabled={designFleet.length === 1}
+                              aria-label="verwijder omvormertype"
+                              style={{ padding: "4px 8px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: designFleet.length === 1 ? "default" : "pointer", color: "var(--color-text-danger)", opacity: designFleet.length === 1 ? 0.4 : 1 }}
+                            >
+                              <i className="ti ti-trash" style={{ fontSize: 14 }} />
+                            </button>
+                          </div>
+                          {stat && stat.totalAc > 0 && (
+                            <div style={{ fontSize: 11, ...muted, paddingLeft: 2 }}>
+                              DC/AC:{" "}
+                              <b style={{ color: stat.highOverdim ? "var(--color-text-warning)" : "var(--color-text-primary)" }}>
+                                {(stat.dcAcRatio * 100).toFixed(0)}%
+                              </b>{" "}
+                              ({(stat.assignedWp / 1000).toFixed(1)} kWp / {(stat.totalAc / 1000).toFixed(1)} kW AC)
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                  <button onClick={addFleetRow} style={{ fontSize: 12, padding: "4px 10px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-primary)", marginBottom: 8 }}>
+                    <i className="ti ti-plus" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} /> Omvormertype toevoegen
+                  </button>
                   <div style={{ fontSize: 12, ...muted }}>
-                    {designInv.nMppt} MPPT × {designInv.stringsPerMppt} string · Vmax {designInv.vmax} V · {designInv.imppt} A/MPPT
+                    Totaal: {designUnits.length} eenhe{designUnits.length === 1 ? "id" : "den"} · {designUnits.reduce((s, u) => s + u.inverter.nMppt, 0)} MPPT-slots
                   </div>
                 </div>
                 <div style={card}>
@@ -1103,39 +1518,48 @@ export default function PVConfigurator() {
                     <button onClick={() => { setDesignAssignMode("auto"); setDesignManualAssign(null); }} style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: designAssignMode === "auto" ? "var(--color-background-info)" : "transparent", color: designAssignMode === "auto" ? "var(--color-text-info)" : "var(--color-text-primary)" }}>Automatisch</button>
                     <button onClick={() => setDesignAssignMode("manual")} style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: designAssignMode === "manual" ? "var(--color-background-info)" : "transparent", color: designAssignMode === "manual" ? "var(--color-text-info)" : "var(--color-text-primary)" }}>Handmatig</button>
                   </div>
-                  <div style={{ fontSize: 12, ...muted, marginTop: 6 }}>Automatisch houdt zelfde oriëntatie op zelfde MPPT. Wil je iets anders? Gebruik het Agent-tabblad om een herindeling te laten voorstellen.</div>
+                  <div style={{ fontSize: 12, ...muted, marginTop: 6 }}>Automatisch houdt zelfde oriëntatie op zelfde MPPT en vult eenheden op volgorde. Bij een mix van typen: gebruik Handmatig om specifieke strings naar een specifiek omvormertype te sturen.</div>
                 </div>
               </div>
 
-              <div style={{ display: "grid", gap: 12, marginBottom: 28 }}>
-                {designAssignment.mppts.map((stringIdxs, mIdx) => (
-                  <div key={mIdx} style={{ ...card, padding: "16px 20px" }}>
-                    <div style={{ fontWeight: 500, marginBottom: 10 }}>MPPT {mIdx + 1}</div>
-                    {stringIdxs.length === 0 ? (
-                      <div style={{ fontSize: 13, ...muted }}>Leeg</div>
-                    ) : (
-                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                        {stringIdxs.map((si) => {
-                          const s = designStringsResolved[si];
-                          return (
-                            <div key={si} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                              <span style={{ color: "var(--color-text-secondary)" }}>String {si + 1} · {s.n} panelen</span>
-                              <span style={{ color: "var(--color-text-tertiary)" }}>{s.azimuth}° · {s.helling}°</span>
+              <div style={{ display: "grid", gap: 20, marginBottom: 28 }}>
+                {designUnits.map((unit, uIdx) => (
+                  <div key={uIdx}>
+                    <div style={{ fontWeight: 500, fontSize: 13, marginBottom: 8 }}>
+                      Omvormer {unit.unitNumber} <span style={{ ...muted, fontWeight: 400 }}>· {unit.inverterId}</span>
+                    </div>
+                    <div style={{ display: "grid", gap: 12 }}>
+                      {(designFleetAssignment.units[uIdx] || []).map((stringIdxs, mIdx) => (
+                        <div key={mIdx} style={{ ...card, padding: "16px 20px" }}>
+                          <div style={{ fontWeight: 500, marginBottom: 10 }}>MPPT {mIdx + 1}</div>
+                          {stringIdxs.length === 0 ? (
+                            <div style={{ fontSize: 13, ...muted }}>Leeg</div>
+                          ) : (
+                            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                              {stringIdxs.map((si) => {
+                                const s = designStringsResolved[si];
+                                return (
+                                  <div key={si} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                                    <span style={{ color: "var(--color-text-secondary)" }}>String {si + 1} · {s.n} panelen</span>
+                                    <span style={{ color: "var(--color-text-tertiary)" }}>{s.azimuth}° · {s.helling}°</span>
+                                  </div>
+                                );
+                              })}
                             </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                    {designAssignMode === "manual" && (
-                      <div style={{ marginTop: 10, paddingTop: 10, borderTop: "0.5px solid var(--color-border-tertiary)", fontSize: 12, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                        <span style={muted}>Wijs string toe:</span>
-                        {designStringsResolved.map((s, si) => (
-                          <button key={si} onClick={() => assignToMppt(si, mIdx)} style={{ fontSize: 11, padding: "2px 8px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", background: stringIdxs.includes(si) ? "var(--color-background-info)" : "transparent", color: stringIdxs.includes(si) ? "var(--color-text-info)" : "var(--color-text-primary)", cursor: "pointer" }}>
-                            S{si + 1} ({s.n}@{s.azimuth}°)
-                          </button>
-                        ))}
-                      </div>
-                    )}
+                          )}
+                          {designAssignMode === "manual" && (
+                            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "0.5px solid var(--color-border-tertiary)", fontSize: 12, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
+                              <span style={muted}>Wijs string toe:</span>
+                              {designStringsResolved.map((s, si) => (
+                                <button key={si} onClick={() => assignToMppt(si, uIdx, mIdx)} style={{ fontSize: 11, padding: "2px 8px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", background: stringIdxs.includes(si) ? "var(--color-background-info)" : "transparent", color: stringIdxs.includes(si) ? "var(--color-text-info)" : "var(--color-text-primary)", cursor: "pointer" }}>
+                                  S{si + 1} ({s.n}@{s.azimuth}°)
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1155,38 +1579,38 @@ export default function PVConfigurator() {
           )}
 
           {/* STAP 3: RESULTAAT */}
-          {designStep === "resultaat" && designInv && designResult && (
+          {designStep === "resultaat" && designUnits.length > 0 && designFleetResults.length > 0 && (
             <>
               <div
                 style={{
                   ...card,
                   marginBottom: 20,
-                  background: designResult.pass && designResult.allAssigned !== false ? "var(--color-background-success)" : "var(--color-background-danger)",
+                  background: designFleetPass ? "var(--color-background-success)" : "var(--color-background-danger)",
                   border: "none",
                 }}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   <i
-                    className={`ti ${designResult.pass && designAssignment.overflow !== true ? "ti-circle-check" : "ti-x"}`}
-                    style={{ fontSize: 24, color: designResult.pass && !designAssignment.overflow ? "var(--color-text-success)" : "var(--color-text-danger)" }}
+                    className={`ti ${designFleetPass ? "ti-circle-check" : "ti-x"}`}
+                    style={{ fontSize: 24, color: designFleetPass ? "var(--color-text-success)" : "var(--color-text-danger)" }}
                     aria-hidden="true"
                   />
-                  <span style={{ fontWeight: 500, fontSize: 16, color: designResult.pass && !designAssignment.overflow ? "var(--color-text-success)" : "var(--color-text-danger)" }}>
-                    {designAssignment.overflow
-                      ? `Te veel strings voor één ${designInv.id}`
-                      : designResult.pass
-                      ? `Configuratie past binnen alle grenzen van de ${designInv.id}`
-                      : `Configuratie overschrijdt een of meer grenzen van de ${designInv.id}`}
+                  <span style={{ fontWeight: 500, fontSize: 16, color: designFleetPass ? "var(--color-text-success)" : "var(--color-text-danger)" }}>
+                    {designFleetAssignment.overflow
+                      ? `Te veel strings voor dit omvormerpark (${designUnits.length} eenhe${designUnits.length === 1 ? "id" : "den"})`
+                      : designFleetPass
+                      ? `Configuratie past binnen alle grenzen van het omvormerpark`
+                      : `Configuratie overschrijdt een of meer grenzen op ≥1 omvormer`}
                   </span>
                 </div>
-                <div style={{ fontSize: 13, marginTop: 8, color: designResult.pass && !designAssignment.overflow ? "var(--color-text-success)" : "var(--color-text-danger)" }}>
-                  {(designResult.totalWp / 1000).toFixed(2)} kWp · {designStrings.reduce((s, x) => s + x.n, 0)} panelen
-                  {designResult.anyMixed && <span> · let op: gemengde oriëntatie op ≥1 MPPT — optimizers nodig</span>}
-                  {!designResult.powerOk && <span> · DC-vermogen boven omvormerlimiet</span>}
+                <div style={{ fontSize: 13, marginTop: 8, color: designFleetPass ? "var(--color-text-success)" : "var(--color-text-danger)" }}>
+                  {(designTotalWp / 1000).toFixed(2)} kWp · {designStrings.reduce((s, x) => s + x.n, 0)} panelen · {designUnits.length} omvormereenhe{designUnits.length === 1 ? "id" : "den"}
+                  {designAnyMixed && <span> · let op: gemengde oriëntatie op ≥1 MPPT — optimizers nodig</span>}
+                  {designAnyPowerNotOk && <span> · DC-vermogen boven omvormerlimiet op ≥1 eenheid</span>}
                 </div>
-                {(designAssignment.overflow || !designResult.pass) && (
+                {(designFleetAssignment.overflow || !designFleetPass) && (
                   <div style={{ fontSize: 12, marginTop: 8, color: "var(--color-text-danger)" }}>
-                    Past niet op deze omvormer? Gebruik het tabblad "Omvormer zoeken" om te zien welke omvormer(s) wél passen bij dit aantal panelen.
+                    Past niet? Pas het omvormerpark in de Indeling-stap aan, of gebruik "Omvormer zoeken" om te zien welke omvormer(s) wél passen bij dit aantal panelen.
                   </div>
                 )}
               </div>
@@ -1195,54 +1619,60 @@ export default function PVConfigurator() {
                 <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
                   <i className="ti ti-alert-triangle" style={{ fontSize: 18, color: "var(--color-text-warning)", marginTop: 2 }} aria-hidden="true" />
                   <div style={{ fontSize: 13, color: "var(--color-text-warning)" }}>
-                    <b>Let op — verdeelkast klant.</b> De verdeelkast moet de opgetelde stromen aankunnen: de hoofdaansluiting ({conn.phases}×{conn.amps} A) plus de uitgangsstroom van de omvormer.
+                    <b>Let op — verdeelkast klant.</b> De verdeelkast moet de opgetelde stromen aankunnen: de hoofdaansluiting ({conn.phases}×{conn.amps} A) plus de uitgangsstroom van alle omvormereenheden samen.
                     <div style={{ marginTop: 4 }}>
-                      Aansluiting {conn.phases}×{conn.amps} A + omvormer-uitgang {designInv.iacMax} A
-                      {" = "}<b>{conn.amps} A + {designInv.iacMax} A ≈ {(conn.amps + designInv.iacMax).toFixed(0)} A per fase</b> die door de kast moet kunnen lopen.
+                      Aansluiting {conn.phases}×{conn.amps} A + omvormer-uitgang totaal {totalIacMax.toFixed(1)} A ({designUnits.length}×)
+                      {" = "}<b>{conn.amps} A + {totalIacMax.toFixed(1)} A ≈ {(conn.amps + totalIacMax).toFixed(0)} A per fase</b> die door de kast moet kunnen lopen.
                       {conn.phases === 1 && <span> (1-fase: alles op één fase)</span>}
                     </div>
-                    {!designInv.fitsConn && (
+                    {!fleetFitsConn && (
                       <div style={{ marginTop: 6, fontWeight: 500 }}>
-                        Uitgangsstroom ({designInv.iacMax} A) overschrijdt de aansluitwaarde ({conn.amps} A/fase): grote aanpassing in de verdeelkast nodig, en zonder accu niet echt rendabel door aftopverliezen.
+                        Totale uitgangsstroom ({totalIacMax.toFixed(1)} A) overschrijdt de aansluitwaarde ({conn.amps} A/fase): grote aanpassing in de verdeelkast nodig, en zonder accu niet echt rendabel door aftopverliezen.
                       </div>
                     )}
                   </div>
                 </div>
               </div>
 
-              <h3 style={{ fontSize: 16, fontWeight: 500, margin: "0 0 12px" }}>Per MPPT</h3>
-              <div style={{ display: "grid", gap: 12, marginBottom: 28 }}>
-                {designResult.mpptResults.map((m) => (
-                  <div key={m.mpptNum} style={{ ...card, padding: "16px 20px" }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: m.empty ? 0 : 10 }}>
-                      <span style={{ fontWeight: 500 }}>
-                        MPPT {m.mpptNum + 1}
-                        {m.empty ? <span style={{ ...muted, fontWeight: 400 }}> — leeg</span> : null}
-                        {m.mixed && <span style={{ background: "var(--color-background-warning)", color: "var(--color-text-warning)", fontSize: 11, padding: "2px 8px", borderRadius: "var(--border-radius-md)", marginLeft: 8 }}>gemengd</span>}
-                      </span>
-                      {!m.empty && <i className={`ti ${m.pass ? "ti-check" : "ti-x"}`} style={{ color: m.pass ? "var(--color-text-success)" : "var(--color-text-danger)", fontSize: 18 }} aria-hidden="true" />}
-                    </div>
-                    {!m.empty && (
-                      <>
-                        <div style={{ fontSize: 12, ...muted, marginBottom: 10 }}>
-                          {m.strings.map((s, k) => `${s.n}× ${s.panel.wp}Wp @ ${s.azimuth}°`).join("  +  ")}
+              {designFleetResults.map(({ unit, result }) => (
+                <div key={unit.unitNumber} style={{ marginBottom: 28 }}>
+                  <h3 style={{ fontSize: 16, fontWeight: 500, margin: "0 0 12px" }}>
+                    Omvormer {unit.unitNumber} <span style={{ ...muted, fontWeight: 400 }}>· {unit.inverterId} · Per MPPT</span>
+                  </h3>
+                  <div style={{ display: "grid", gap: 12 }}>
+                    {result.mpptResults.map((m) => (
+                      <div key={m.mpptNum} style={{ ...card, padding: "16px 20px" }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 6, marginBottom: m.empty ? 0 : 10 }}>
+                          <span style={{ fontWeight: 500 }}>
+                            MPPT {m.mpptNum + 1}
+                            {m.empty ? <span style={{ ...muted, fontWeight: 400 }}> — leeg</span> : null}
+                            {m.mixed && <span style={{ background: "var(--color-background-warning)", color: "var(--color-text-warning)", fontSize: 11, padding: "2px 8px", borderRadius: "var(--border-radius-md)", marginLeft: 8 }}>gemengd</span>}
+                          </span>
+                          {!m.empty && <i className={`ti ${m.pass ? "ti-check" : "ti-x"}`} style={{ color: m.pass ? "var(--color-text-success)" : "var(--color-text-danger)", fontSize: 18 }} aria-hidden="true" />}
                         </div>
-                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                          {m.checks.map((c, k) => (
-                            <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: c.pass ? "var(--color-text-secondary)" : "var(--color-text-danger)" }}>
-                              <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                <i className={`ti ${c.pass ? "ti-check" : "ti-x"}`} style={{ fontSize: 14 }} aria-hidden="true" />
-                                {c.label}
-                              </span>
-                              <span>{fmtCheckValue(c)} {fmtCheckLimit(c)}</span>
+                        {!m.empty && (
+                          <>
+                            <div style={{ fontSize: 12, ...muted, marginBottom: 10 }}>
+                              {m.strings.map((s, k) => `${s.n}× ${s.panel.wp}Wp @ ${s.azimuth}°`).join("  +  ")}
                             </div>
-                          ))}
-                        </div>
-                      </>
-                    )}
+                            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                              {m.checks.map((c, k) => (
+                                <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 13, color: c.pass ? "var(--color-text-secondary)" : "var(--color-text-danger)" }}>
+                                  <span style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                                    <i className={`ti ${c.pass ? "ti-check" : "ti-x"}`} style={{ fontSize: 14 }} aria-hidden="true" />
+                                    {c.label}
+                                  </span>
+                                  <span>{fmtCheckValue(c)} {fmtCheckLimit(c)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </>
+                        )}
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+                </div>
+              ))}
 
               <div style={{ ...card, marginBottom: 20 }}>
                 <div style={{ display: "flex", gap: 24, flexWrap: "wrap", alignItems: "flex-end", justifyContent: "space-between" }}>
@@ -1285,7 +1715,7 @@ export default function PVConfigurator() {
           )}
 
           {/* STAP 4: RAPPORT */}
-          {designStep === "rapport" && designInv && (
+          {designStep === "rapport" && designUnits.length > 0 && (
             <>
               <p style={{ fontSize: 13, ...muted, marginTop: 0, marginBottom: 20 }}>
                 Genereer een installatie-instructie voor de monteur: een optioneel legplan-plaatje, plus een tabel met
@@ -1347,7 +1777,7 @@ export default function PVConfigurator() {
                   <tbody>
                     {reportRows.map((r) => (
                       <tr key={r.label} style={{ borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
-                        <td style={{ padding: "6px 8px" }}>{designInv.id}</td>
+                        <td style={{ padding: "6px 8px" }}>{r.inverterId} (#{r.unitNumber})</td>
                         <td style={{ padding: "6px 8px" }}>{r.mppt}</td>
                         <td style={{ padding: "6px 8px", fontWeight: 500 }}>{r.label}</td>
                         <td style={{ padding: "6px 8px" }}>{r.n}</td>
@@ -1591,18 +2021,54 @@ export default function PVConfigurator() {
                   {datasheetDraft.rows.map((r, i) => (
                     <div key={i} style={{ ...card, padding: "10px 12px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                       <input type="checkbox" checked={r.include} onChange={() => toggleDatasheetRow(i)} />
-                      {(addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS).map((f) => (
-                        <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                          <span style={{ fontSize: 10, ...muted }}>{f.label}</span>
-                          <input
-                            type={f.key === "id" ? "text" : "number"}
-                            step={f.step}
-                            value={r[f.key] ?? ""}
-                            onChange={(e) => updateDatasheetRow(i, f.key, e.target.value)}
-                            style={{ width: f.key === "id" ? 140 : 70 }}
-                          />
-                        </div>
-                      ))}
+                      {(addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS).map((f) =>
+                        f.key === "stringsPerMppt" && addType === "inverter" ? (
+                          <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                            <span style={{ fontSize: 10, ...muted, display: "flex", alignItems: "center", gap: 4 }}>
+                              {f.label}
+                              <button
+                                type="button"
+                                onClick={() => toggleDatasheetRowAsymmetric(i)}
+                                style={{ fontSize: 9, padding: "0 4px", border: "0.5px solid var(--color-border-secondary)", borderRadius: 4, background: r.asymmetricMppt ? "var(--color-background-info)" : "transparent", color: r.asymmetricMppt ? "var(--color-text-info)" : "var(--color-text-secondary)", cursor: "pointer" }}
+                              >
+                                ongelijk
+                              </button>
+                            </span>
+                            {r.asymmetricMppt ? (
+                              <div style={{ display: "flex", gap: 3 }}>
+                                {Array.from({ length: Math.max(1, Math.min(20, Math.round(Number(r.nMppt)) || 1)) }, (_, mIdx) => (
+                                  <input
+                                    key={mIdx}
+                                    type="number"
+                                    title={`MPPT ${mIdx + 1}`}
+                                    value={(Array.isArray(r.stringsPerMppt) ? r.stringsPerMppt[mIdx] : "") ?? ""}
+                                    onChange={(e) => updateDatasheetRowMppt(i, mIdx, e.target.value)}
+                                    style={{ width: 30 }}
+                                  />
+                                ))}
+                              </div>
+                            ) : (
+                              <input
+                                type="number"
+                                value={r.stringsPerMppt ?? ""}
+                                onChange={(e) => updateDatasheetRow(i, "stringsPerMppt", e.target.value)}
+                                style={{ width: 70 }}
+                              />
+                            )}
+                          </div>
+                        ) : (
+                          <div key={f.key} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                            <span style={{ fontSize: 10, ...muted }}>{f.label}</span>
+                            <input
+                              type={f.key === "id" ? "text" : "number"}
+                              step={f.step}
+                              value={r[f.key] ?? ""}
+                              onChange={(e) => updateDatasheetRow(i, f.key, e.target.value)}
+                              style={{ width: f.key === "id" ? 140 : 70 }}
+                            />
+                          </div>
+                        )
+                      )}
                       {r.iacMaxComputed && (
                         <span style={{ fontSize: 11, color: "var(--color-text-warning)" }}>iacMax berekend (pacNom/400V/√3), niet in datasheet — extra controleren</span>
                       )}
@@ -1685,18 +2151,62 @@ export default function PVConfigurator() {
             )}
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 10, marginBottom: 16, maxWidth: 700 }}>
-              {(addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS).map((f) => (
-                <div key={f.key}>
-                  <div style={label}>{f.label}</div>
-                  <input
-                    type={f.key === "id" ? "text" : "number"}
-                    step={f.step}
-                    value={addVariant[f.key] ?? ""}
-                    onChange={(e) => setAddVariant((prev) => ({ ...prev, [f.key]: e.target.value }))}
-                    style={{ width: "100%" }}
-                  />
-                </div>
-              ))}
+              {(addType === "panel" ? PANEL_VARIANT_FIELDS : INVERTER_VARIANT_FIELDS).map((f) =>
+                f.key === "stringsPerMppt" && addType === "inverter" ? (
+                  <div key={f.key} style={{ gridColumn: addAsymmetricMppt ? "1 / -1" : undefined }}>
+                    <div style={{ ...label, display: "flex", alignItems: "center", gap: 6 }}>
+                      <span>{f.label}</span>
+                      <button
+                        type="button"
+                        onClick={toggleAddAsymmetric}
+                        style={{ fontSize: 10, padding: "1px 6px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: addAsymmetricMppt ? "var(--color-background-info)" : "transparent", color: addAsymmetricMppt ? "var(--color-text-info)" : "var(--color-text-secondary)", cursor: "pointer" }}
+                      >
+                        Ongelijke MPPT's
+                      </button>
+                    </div>
+                    {addAsymmetricMppt ? (
+                      <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                        {Array.from({ length: Math.max(1, Math.min(20, Math.round(Number(addVariant.nMppt)) || 1)) }, (_, mIdx) => (
+                          <input
+                            key={mIdx}
+                            type="number"
+                            title={`MPPT ${mIdx + 1}`}
+                            value={(Array.isArray(addVariant.stringsPerMppt) ? addVariant.stringsPerMppt[mIdx] : "") ?? ""}
+                            onChange={(e) =>
+                              setAddVariant((prev) => {
+                                const n = Math.max(1, Math.min(20, Math.round(Number(prev.nMppt)) || 1));
+                                const arr = Array.isArray(prev.stringsPerMppt) ? [...prev.stringsPerMppt] : Array.from({ length: n }, () => "");
+                                arr.length = n;
+                                arr[mIdx] = e.target.value;
+                                return { ...prev, stringsPerMppt: arr };
+                              })
+                            }
+                            style={{ width: 44 }}
+                          />
+                        ))}
+                      </div>
+                    ) : (
+                      <input
+                        type="number"
+                        value={addVariant.stringsPerMppt ?? ""}
+                        onChange={(e) => setAddVariant((prev) => ({ ...prev, stringsPerMppt: e.target.value }))}
+                        style={{ width: "100%" }}
+                      />
+                    )}
+                  </div>
+                ) : (
+                  <div key={f.key}>
+                    <div style={label}>{f.label}</div>
+                    <input
+                      type={f.key === "id" ? "text" : "number"}
+                      step={f.step}
+                      value={addVariant[f.key] ?? ""}
+                      onChange={(e) => setAddVariant((prev) => ({ ...prev, [f.key]: e.target.value }))}
+                      style={{ width: "100%" }}
+                    />
+                  </div>
+                )
+              )}
             </div>
 
             <button
@@ -1733,7 +2243,7 @@ export default function PVConfigurator() {
               <div style={{ ...card, ...muted, fontSize: 13 }}>Nog geen vragen gesteld in dit gesprek.</div>
             )}
             {chatMessages.map((m, i) => {
-              const applicable = m.role === "assistant" ? findApplicableAssignment(m.toolCalls) : null;
+              const applicable = m.role === "assistant" && designUnits.length === 1 ? findApplicableAssignment(m.toolCalls) : null;
               return (
                 <div
                   key={i}

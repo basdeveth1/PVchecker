@@ -27,7 +27,7 @@ Geef alleen JSON terug, geen markdown, geen uitleg. Als je een veld niet zeker k
     {
       "id": "<exacte type-aanduiding>", "pmax": <max. DC-vermogen in W>, "vmax": <max. DC-spanning in V>,
       "vmpptMin": <V>, "vmpptMax": <V>, "imppt": <max. stroom per MPPT in A>, "isc": <max. kortsluitstroom per MPPT in A>,
-      "nMppt": <aantal MPPT's>, "stringsPerMppt": <strings per MPPT>, "pacNom": <nominaal AC-vermogen in W>,
+      "nMppt": <aantal MPPT's>, "stringsPerMppt": <strings per MPPT — meestal één getal, maar als de datasheet ongelijke trackers beschrijft (bijv. MPPT 1 max 1 string, MPPT 2 max 2 strings), geef dan een array van nMppt getallen, bijv. [1, 2]>, "pacNom": <nominaal AC-vermogen in W>,
       "iacMax": <max. AC-stroom in A>, "iacMaxComputed": <true als je iacMax zelf berekende via pacNom/400V/√3 omdat de datasheet 'm niet expliciet geeft, anders false>
     }
   ]

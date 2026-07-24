@@ -57,7 +57,7 @@ npm run dev       # start de ontwikkelserver
 
 - **Datasheet-extractie is het grootste risico**, niet de rekenkern. Een verkeerd ingelezen Voc zit voor altijd fout in de database. Bouw een verplichte controlestap in stap 2.
 - **iacMax-waarden** zijn deels berekend (pacNom / 400V / √3) waar de datasheet de AC-stroom niet expliciet gaf. Controleer tegen datasheet.
-- **Multi-omvormer verdeling** gaat nu uit van identieke omvormers met gelijke strings. Een echte mix (5× groot + 1× klein) is een toekomstige verfijning.
+- **Multi-omvormer verdeling** ondersteunt in "Ontwerp checken" een echte mix van verschillende omvormertypen (omvormerpark in de Indeling-stap, `autoAssignFleet` in de rekenkern). Het Agent-tabblad ("Toepassen op ontwerp") blijft voorlopig beperkt tot een ontwerp met precies één omvormereenheid.
 - **Aansprakelijkheid**: zodra collega's dit voor echte installaties gebruiken, moet de disclaimer duidelijk zijn dat het ontwerphulp is, geen goedkeuring.
 
 ## De fysica in het kort

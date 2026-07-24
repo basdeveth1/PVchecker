@@ -87,6 +87,30 @@ export function inverterFitsConnection(iacMaxTotal, connAmpsPerPhase) {
 }
 
 // ----------------------------------------------------------------------------
+// MPPT-capaciteit: stringsPerMppt is meestal één getal (uniform, gelijk voor
+// elke MPPT), maar mag ook een array van nMppt waarden zijn voor omvormers
+// met ongelijke trackers (bijv. [1, 2]: MPPT 1 kan 1 string aan, MPPT 2 kan
+// er 2 aan). Overal waar eerder blind inverter.stringsPerMppt werd gebruikt,
+// gaat het nu via één van deze helpers.
+// ----------------------------------------------------------------------------
+
+export function mpptCapacity(inverter, mpptIdx) {
+  return Array.isArray(inverter.stringsPerMppt) ? inverter.stringsPerMppt[mpptIdx] : inverter.stringsPerMppt;
+}
+export function totalMpptSlots(inverter) {
+  return Array.isArray(inverter.stringsPerMppt)
+    ? inverter.stringsPerMppt.reduce((a, b) => a + b, 0)
+    : inverter.nMppt * inverter.stringsPerMppt;
+}
+// Conservatieve uniforme ondergrens — gebruikt waar een zoekfunctie (nog)
+// geen per-MPPT-toewijzing doet, alleen een gelijk aantal strings per MPPT
+// zoekt (bijv. findMatchingInverters/checkConfig): nooit meer beloven dan de
+// krapste tracker aankan.
+export function minMpptCapacity(inverter) {
+  return Array.isArray(inverter.stringsPerMppt) ? Math.min(...inverter.stringsPerMppt) : inverter.stringsPerMppt;
+}
+
+// ----------------------------------------------------------------------------
 // Enkele configuratie-check (één omvormer, gegeven stringlengte)
 // ----------------------------------------------------------------------------
 
@@ -111,7 +135,7 @@ export function checkConfig({ panel, inverter, nPerString, stringsPerMppt, tMinC
   const iscTotal = panel.isc * stringsPerMppt;
   checks.push({ key: "isc", label: `Isc per MPPT (${stringsPerMppt}× string)`, value: iscTotal, unit: "A", limit: inverter.isc, pass: iscTotal <= inverter.isc });
 
-  checks.push({ key: "strings", label: "Strings per MPPT", value: stringsPerMppt, unit: "", limit: inverter.stringsPerMppt, pass: stringsPerMppt <= inverter.stringsPerMppt });
+  checks.push({ key: "strings", label: "Strings per MPPT", value: stringsPerMppt, unit: "", limit: minMpptCapacity(inverter), pass: stringsPerMppt <= minMpptCapacity(inverter) });
 
   return checks;
 }
@@ -130,6 +154,18 @@ export function distributeCounts(total, parts) {
   return Array.from({ length: parts }, (_, i) => base + (i < remainder ? 1 : 0));
 }
 
+// Vertaalt dakvlakken (nog geen strings) naar een concrete strings-lijst,
+// gegeven een gekozen stringlengte (bijv. de winnaar uit findMatchingInverters).
+// Elk dakvlak wordt onafhankelijk over hele strings verdeeld via
+// distributeCounts, zodat een rest binnen dát dakvlak blijft (niet over het
+// hele systeem uitgesmeerd).
+export function buildStringsFromRoofFaces(roofFaces, nPerString) {
+  return roofFaces.flatMap((face) => {
+    const numStrings = Math.max(1, Math.ceil(face.count / nPerString));
+    return distributeCounts(face.count, numStrings).map((n) => ({ n, azimuth: face.azimuth, helling: face.helling }));
+  });
+}
+
 // ----------------------------------------------------------------------------
 // Omvormer zoeken (multi-omvormer, optimalisatie naar 120-150% band)
 // ----------------------------------------------------------------------------
@@ -144,7 +180,7 @@ export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, i
   const totalWp = totalPanels * panel.wp;
 
   for (const inv of inverters) {
-    const maxStringsPerInv = inv.nMppt * inv.stringsPerMppt;
+    const maxStringsPerInv = totalMpptSlots(inv);
     let best = null;
 
     // String-lengte van lang naar kort: langere strings → minder strings nodig.
@@ -193,7 +229,6 @@ export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, i
 
 // Oriëntatie-bewuste toewijzing van strings aan MPPT's van één omvormer.
 export function autoAssign(strings, inverter) {
-  const slots = inverter.stringsPerMppt;
   const mppts = Array.from({ length: inverter.nMppt }, () => []);
   const byAz = {};
   strings.forEach((s, i) => {
@@ -203,19 +238,54 @@ export function autoAssign(strings, inverter) {
   const ordered = Object.values(byAz).sort((a, b) => b.length - a.length).flat();
   for (const si of ordered) {
     const az = strings[si].azimuth;
-    let target = mppts.findIndex((m) => m.length < slots && m.length > 0 && strings[m[0]].azimuth === az);
+    let target = mppts.findIndex((m, idx) => m.length < mpptCapacity(inverter, idx) && m.length > 0 && strings[m[0]].azimuth === az);
     if (target === -1) target = mppts.findIndex((m) => m.length === 0);
-    if (target === -1) target = mppts.findIndex((m) => m.length < slots);
+    if (target === -1) target = mppts.findIndex((m, idx) => m.length < mpptCapacity(inverter, idx));
     if (target === -1) return { mppts, overflow: true };
     mppts[target].push(si);
   }
   return { mppts, overflow: false };
 }
 
+// Verdeelt strings over een vloot van (mogelijk verschillende) omvormer-
+// eenheden. Zelfde heuristiek als autoAssign (oriëntatie eerst, dan
+// capaciteit), nu over alle MPPT-slots van de hele vloot heen. Elektrische
+// geschiktheid per type wordt hier niet gecheckt — dat doet checkLegplan,
+// per eenheid, achteraf (net als bij één omvormer).
+export function autoAssignFleet(strings, units) {
+  const unitMppts = units.map((u) => Array.from({ length: u.inverter.nMppt }, () => []));
+  const slots = [];
+  units.forEach((u, uIdx) => {
+    for (let mIdx = 0; mIdx < u.inverter.nMppt; mIdx++) {
+      slots.push({ uIdx, mIdx, cap: mpptCapacity(u.inverter, mIdx) });
+    }
+  });
+  const arrOf = (s) => unitMppts[s.uIdx][s.mIdx];
+
+  const byAz = {};
+  strings.forEach((s, i) => {
+    (byAz[s.azimuth] = byAz[s.azimuth] || []).push(i);
+  });
+  const ordered = Object.values(byAz).sort((a, b) => b.length - a.length).flat();
+
+  for (const si of ordered) {
+    const az = strings[si].azimuth;
+    let target = slots.find((s) => {
+      const a = arrOf(s);
+      return a.length > 0 && a.length < s.cap && strings[a[0]].azimuth === az;
+    });
+    if (!target) target = slots.find((s) => arrOf(s).length === 0);
+    if (!target) target = slots.find((s) => arrOf(s).length < s.cap);
+    if (!target) return { units: unitMppts, overflow: true };
+    arrOf(target).push(si);
+  }
+  return { units: unitMppts, overflow: false };
+}
+
 // Multi-omvormer legplan-advies: aantal benodigde units met optimale band.
 export function checkLegplanMulti(strings, inverter, tMinCold, tMaxHot) {
   if (strings.length === 0) return null;
-  const maxStringsPerInv = inverter.nMppt * inverter.stringsPerMppt;
+  const maxStringsPerInv = totalMpptSlots(inverter);
   let allStringsOk = true;
   for (const s of strings) {
     const vocCold = vocAtTemp(s.panel.voc, s.panel.betaVoc, tMinCold) * s.n;
@@ -269,7 +339,7 @@ export function checkLegplan(strings, inverter, assignment, tMinCold, tMaxHot) {
     const iscTotal = strs.reduce((sum, s) => sum + s.panel.isc, 0);
     checks.push({ key: "isc", label: `Isc (${strs.length}× string)`, value: iscTotal, unit: "A", limit: inverter.isc, pass: iscTotal <= inverter.isc });
 
-    checks.push({ key: "strings", label: "Strings", value: strs.length, unit: "", limit: inverter.stringsPerMppt, pass: strs.length <= inverter.stringsPerMppt });
+    checks.push({ key: "strings", label: "Strings", value: strs.length, unit: "", limit: mpptCapacity(inverter, mpptNum), pass: strs.length <= mpptCapacity(inverter, mpptNum) });
 
     return { mpptNum, empty: false, checks, strings: strs, stringIdxs, mixed, pass: allPass(checks) };
   });
