@@ -127,8 +127,11 @@ export function distributeCounts(total, parts) {
 // ----------------------------------------------------------------------------
 
 // Geeft per omvormertype de beste verdeling: zo min mogelijk omvormers, met
-// DC/AC-overdimensionering liefst in [OVERDIM_MIN, OVERDIM_MAX].
-export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters }) {
+// DC/AC-overdimensionering liefst in [OVERDIM_MIN, OVERDIM_MAX]. Optioneel
+// `fixedInvCount`: reken met een vast aantal omvormers (bijv. omdat een pand
+// een vast aantal aansluitingen heeft) in plaats van te optimaliseren naar
+// het minimum — vindt dan de beste stringlengte gegeven dat vaste aantal.
+export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters, fixedInvCount }) {
   const results = [];
   const totalWp = totalPanels * panel.wp;
 
@@ -139,11 +142,16 @@ export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, i
     // String-lengte van lang naar kort: langere strings → minder strings nodig.
     for (let nPer = 40; nPer >= 2; nPer--) {
       const stringsTotal = Math.ceil(totalPanels / nPer);
-      const minInvByStrings = Math.ceil(stringsTotal / maxStringsPerInv);
-      const minInvByPower = Math.ceil(totalWp / inv.pmax);
-      // pmax is de harde grens (fabrikant-max PV-input). Overdimensionering
-      // boven OVERDIM_MAX is toegestaan zolang DC per omvormer onder pmax blijft.
-      let invCount = Math.max(minInvByStrings, minInvByPower);
+      let invCount;
+      if (fixedInvCount) {
+        invCount = fixedInvCount;
+      } else {
+        const minInvByStrings = Math.ceil(stringsTotal / maxStringsPerInv);
+        const minInvByPower = Math.ceil(totalWp / inv.pmax);
+        // pmax is de harde grens (fabrikant-max PV-input). Overdimensionering
+        // boven OVERDIM_MAX is toegestaan zolang DC per omvormer onder pmax blijft.
+        invCount = Math.max(minInvByStrings, minInvByPower);
+      }
 
       const stringsPerInv = Math.ceil(stringsTotal / invCount);
       const stringsPerMpptUsed = Math.ceil(stringsPerInv / inv.nMppt);

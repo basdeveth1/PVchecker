@@ -18,6 +18,7 @@ import {
   autoAssign,
   checkLegplan,
   distributeCounts,
+  OVERDIM_MIN,
 } from "../src/core/calculations.js";
 
 // Referentiepaneel: JA Solar JAM54D41-430/GB
@@ -91,6 +92,19 @@ test("1400 panelen → ~5× SUN2000-100KTL in band", () => {
   assert.equal(res[0].invCount, 5, "verwacht 5 omvormers");
   assert.ok(res[0].inBand, "overdimensionering moet in 120-150% band");
   assert.ok(res[0].dcAcRatio >= 1.2 && res[0].dcAcRatio <= 1.5);
+});
+
+test("fixedInvCount: 1400 panelen geforceerd op 7 omvormers (meer dan het optimale minimum van 5)", () => {
+  const res = findMatchingInverters({ panel: JA430, totalPanels: 1400, tMinCold: -10, tMaxHot: 70, inverters: [SUN100], fixedInvCount: 7 });
+  assert.equal(res.length, 1);
+  assert.equal(res[0].invCount, 7, "moet het opgegeven vaste aantal gebruiken, niet het geoptimaliseerde minimum");
+  assert.ok(!res[0].inBand, "7 omvormers voor 1400 panelen zit onder de 120-150%-band");
+  assert.ok(res[0].dcAcRatio < OVERDIM_MIN);
+});
+
+test("fixedInvCount: te weinig omvormers voor het aantal panelen levert geen match op", () => {
+  const res = findMatchingInverters({ panel: JA430, totalPanels: 1400, tMinCold: -10, tMaxHot: 70, inverters: [SUN100], fixedInvCount: 1 });
+  assert.equal(res.length, 0, "1400 panelen past niet op 1 SUN2000-100KTL, ongeacht stringlengte");
 });
 
 test("GoodWe wordt boven gelijkwaardige niet-GoodWe gesorteerd", () => {

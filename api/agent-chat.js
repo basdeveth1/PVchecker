@@ -166,7 +166,7 @@ function executeTool(name, input, { panels, inverters, tMinCold, tMaxHot }) {
   }
 }
 
-function buildSystemPrompt(panels, inverters, tMinCold, tMaxHot) {
+function buildSystemPrompt(panels, inverters, tMinCold, tMaxHot, currentDesign) {
   const panelLines = panels
     .map((p) => `${p.id}: ${p.wp}Wp, Voc ${p.voc}V, Vmp ${p.vmp}V, Isc ${p.isc}A, Imp ${p.imp}A, β ${p.betaVoc}%/°C (${p.family})`)
     .join("\n");
@@ -176,6 +176,13 @@ function buildSystemPrompt(panels, inverters, tMinCold, tMaxHot) {
         `${i.id}: ${i.nMppt} MPPT × ${i.stringsPerMppt} strings, Vmax ${i.vmax}V, MPPT-bereik ${i.vmpptMin}-${i.vmpptMax}V, ${i.imppt}A/${i.isc}A, Pmax ${i.pmax}W, Pac ${i.pacNom}W${i.isGoodwe ? " (GoodWe)" : ""} (${i.family})`
     )
     .join("\n");
+
+  const designSection = currentDesign
+    ? `\n\nDe gebruiker heeft nu dit ontwerp open in het tabblad "Ontwerp checken" (bedoeld met "mijn ontwerp"/"mijn strings"/"mijn huidige indeling"):
+Omvormer: ${currentDesign.inverterId || "nog niet gekozen"}
+Strings (n, panelId, azimuth, helling): ${JSON.stringify(currentDesign.strings)}
+Gebruik deze gegevens als de vraag ernaar verwijst — de gebruiker hoeft ze niet opnieuw te typen. Bij een herverdeel-verzoek: gebruik auto_assign of check_legplan met exact deze strings en dit omvormer-id, zodat het voorstel direct op het ontwerp toegepast kan worden.`
+    : "";
 
   return `Je bent een PV-ontwerpassistent binnen een tool voor zonnepaneel-installateurs. Je helpt met vragen over stringconfiguraties, omvormerkeuze en paneelverdeling.
 
@@ -188,6 +195,7 @@ ${panelLines}
 
 Beschikbare omvormers:
 ${invLines}
+${designSection}
 
 Geef aan het eind een helder, beknopt antwoord in het Nederlands. Vermeld expliciet welke aannames je deed (bijv. welk paneel of welke omvormer je koos als de vraag dat niet specificeerde).`;
 }
@@ -202,7 +210,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  const { messages, panels, inverters, tMinCold, tMaxHot } = req.body || {};
+  const { messages, panels, inverters, tMinCold, tMaxHot, currentDesign } = req.body || {};
   if (!Array.isArray(messages) || messages.length === 0 || !Array.isArray(panels) || !Array.isArray(inverters)) {
     res.status(400).json({ error: "messages, panels en inverters zijn verplicht." });
     return;
@@ -212,7 +220,7 @@ export default async function handler(req, res) {
     return;
   }
 
-  const system = buildSystemPrompt(panels, inverters, tMinCold, tMaxHot);
+  const system = buildSystemPrompt(panels, inverters, tMinCold, tMaxHot, currentDesign);
   const conversation = messages.map((m) => ({ role: m.role, content: m.content }));
   const toolCalls = [];
 
