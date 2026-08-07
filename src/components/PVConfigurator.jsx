@@ -102,6 +102,20 @@ function matchExtractedPanel(extracted, availPanels) {
   return candidates.length === 1 ? candidates[0].id : null;
 }
 
+// Telt een strings-lijst (met opgelost paneel) terug op tot dakvlakken:
+// gegroepeerd op paneeltype + oriëntatie + helling, met het totale
+// paneelaantal per groep. Inverse van buildStringsFromRoofFaces.
+function collapseStringsToRoofFaces(stringsResolved) {
+  const groups = new Map();
+  for (const s of stringsResolved) {
+    const key = `${s.panelId}|${s.azimuth}|${s.helling}`;
+    const g = groups.get(key) || { panelId: s.panelId, azimuth: s.azimuth, helling: s.helling, count: 0 };
+    g.count += s.n;
+    groups.set(key, g);
+  }
+  return [...groups.values()];
+}
+
 const DESIGN_STEPS = [
   { id: "invoer", label: "Invoer" },
   { id: "indeling", label: "Indeling" },
@@ -304,6 +318,20 @@ export default function PVConfigurator() {
       })),
     [designStrings, availPanels]
   );
+
+  // Houdt de dakvlak-tabel in de Indeling-stap ("Nog geen stringverdeling?")
+  // synchroon met het actieve ontwerp — anders blijft daar een sinds het
+  // laden van de pagina ongewijzigd standaardvoorbeeld staan, los van wat er
+  // via Invoer (handmatig of Sollit-screenshot) is ingevuld.
+  useEffect(() => {
+    if (designStrings.length === 0) return;
+    const groups = collapseStringsToRoofFaces(designStringsResolved);
+    setRoofFaces(groups.map(({ count, azimuth, helling }) => ({ count, azimuth, helling })));
+    const uniquePanelIds = [...new Set(groups.map((g) => g.panelId))];
+    if (uniquePanelIds.length === 1) setRoofPanelId(uniquePanelIds[0]);
+    setRoofMatches(null);
+  }, [designStrings]);
+
   // Vloot uitklappen tot individuele, doorlopend genummerde eenheden — mag
   // meerdere typen mixen (bijv. 3× GW40K + 1× GW33K wordt eenheid 1-3-4).
   const designUnits = useMemo(() => {
@@ -634,15 +662,8 @@ export default function PVConfigurator() {
     const inverter = availInverters.find((i) => i.id === row.inverterId);
     if (!inverter) return;
 
-    const roofFaceGroups = new Map(); // "panelId|azimuth|helling" -> { panelId, azimuth, helling, count }
-    for (const s of designStringsResolved) {
-      const key = `${s.panelId}|${s.azimuth}|${s.helling}`;
-      const g = roofFaceGroups.get(key) || { panelId: s.panelId, azimuth: s.azimuth, helling: s.helling, count: 0 };
-      g.count += s.n;
-      roofFaceGroups.set(key, g);
-    }
     const byPanel = new Map();
-    for (const g of roofFaceGroups.values()) {
+    for (const g of collapseStringsToRoofFaces(designStringsResolved)) {
       if (!byPanel.has(g.panelId)) byPanel.set(g.panelId, []);
       byPanel.get(g.panelId).push({ count: g.count, azimuth: g.azimuth, helling: g.helling });
     }
