@@ -13,6 +13,9 @@ import {
   checkLegplan,
   stringVocStc,
   buildStringsFromRoofFaces,
+  requiredCableCrossSection,
+  CABLE_CROSS_SECTIONS,
+  VOLTAGE_DROP_MAX_PCT,
   OVERDIM_MIN,
   OVERDIM_MAX,
 } from "../core/calculations.js";
@@ -221,6 +224,11 @@ export default function PVConfigurator() {
   const [designAssignMode, setDesignAssignMode] = useState("auto"); // "auto" | "manual"
   const [designManualAssign, setDesignManualAssign] = useState(null); // [unitIdx][mpptIdx] = [stringIdx,...]
 
+  // AC-kabel meterkast → omvormer(s): aderdikte-check op basis van de
+  // opgetelde uitgangsstroom van het omvormerpark (totalIacMax).
+  const [cableLength, setCableLength] = useState(15);
+  const [cableInstallMethod, setCableInstallMethod] = useState("conduit"); // "tray" | "conduit" | "buried"
+
   // Indeling: voorstel voor stringverdeling + omvormer uit een ruw legplan
   // (dakvlakken zonder vooraf bepaalde strings) — vult designStrings/designFleet
   // pas na expliciete "Toepassen", net als de andere extractiestromen.
@@ -413,6 +421,11 @@ export default function PVConfigurator() {
   const designTotalWp = designStringsResolved.reduce((s, x) => s + x.n * x.panel.wp, 0);
   const totalIacMax = designUnits.reduce((sum, u) => sum + u.inverter.iacMax, 0);
   const fleetFitsConn = designUnits.length === 0 || inverterFitsConnection(totalIacMax, conn.amps);
+
+  const cableResult = useMemo(() => {
+    if (totalIacMax <= 0 || !cableLength) return null;
+    return requiredCableCrossSection({ current: totalIacMax, length: cableLength, phases: conn.phases, installMethod: cableInstallMethod });
+  }, [totalIacMax, cableLength, cableInstallMethod, conn.phases]);
 
   // Rapport voor de monteur: label = omvormer.mppt.string, omvormer-cijfer =
   // het doorlopende eenheidsnummer uit designUnits, + Voc STC per string.
@@ -1815,6 +1828,55 @@ export default function PVConfigurator() {
                       </div>
                     )}
                   </div>
+                </div>
+              </div>
+
+              <div style={{ ...card, marginBottom: 20 }}>
+                <div style={{ fontWeight: 500, marginBottom: 12 }}>AC-kabel meterkast → omvormer(s)</div>
+                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14 }}>
+                  <div>
+                    <div style={label}>Kabellengte (m)</div>
+                    <input
+                      type="number"
+                      min="1"
+                      value={cableLength}
+                      onChange={(e) => setCableLength(e.target.value === "" ? "" : Number(e.target.value))}
+                      style={{ width: 90 }}
+                    />
+                  </div>
+                  <div>
+                    <div style={label}>Legmethode</div>
+                    <select value={cableInstallMethod} onChange={(e) => setCableInstallMethod(e.target.value)} style={{ width: 260 }}>
+                      <option value="tray">Kabelgoot / vrije lucht</option>
+                      <option value="conduit">In buis tegen/in een wand</option>
+                      <option value="buried">Ondergronds, rechtstreeks in de grond</option>
+                    </select>
+                  </div>
+                  <div>
+                    <div style={label}>Ontwerpstroom</div>
+                    <div style={{ padding: "8px 0", fontSize: 14 }}>
+                      {totalIacMax.toFixed(1)} A · {conn.phases}-fase <span style={muted}>(totale omvormer-uitgang)</span>
+                    </div>
+                  </div>
+                </div>
+                {cableResult ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <i className="ti ti-circle-check" style={{ fontSize: 20, color: "var(--color-text-success)" }} aria-hidden="true" />
+                    <div style={{ fontSize: 13 }}>
+                      Minimaal <b>{cableResult.crossSection} mm²</b> koper (PVC) — belastbaarheid {cableResult.ampacity} A, spanningsval {cableResult.voltageDropPct.toFixed(2)}% (norm ≤{VOLTAGE_DROP_MAX_PCT}%)
+                      <span style={muted}> · maatgevend: {cableResult.limitedBy}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <i className="ti ti-x" style={{ fontSize: 20, color: "var(--color-text-danger)" }} aria-hidden="true" />
+                    <div style={{ fontSize: 13, color: "var(--color-text-danger)" }}>
+                      Geen standaarddoorsnede tot {CABLE_CROSS_SECTIONS[CABLE_CROSS_SECTIONS.length - 1]} mm² voldoet bij deze stroom/lengte/legmethode — raadpleeg een elektrotechnisch adviseur.
+                    </div>
+                  </div>
+                )}
+                <div style={{ fontSize: 11, ...muted, marginTop: 10 }}>
+                  Vereenvoudigde indicatie: koper, PVC-isolatie, 3%-spanningsvalnorm vast. Stroombelastbaarheid uit IEC 60364-5-52 (tabel B.52.4). Geen vervanging voor een volledige kabelberekening door een elektrotechnisch adviseur.
                 </div>
               </div>
 

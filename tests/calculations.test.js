@@ -24,6 +24,10 @@ import {
   mpptCapacity,
   totalMpptSlots,
   minMpptCapacity,
+  voltageDropPct,
+  requiredCableCrossSection,
+  checkAcCable,
+  VOLTAGE_DROP_MAX_PCT,
   OVERDIM_MIN,
 } from "../src/core/calculations.js";
 
@@ -348,4 +352,50 @@ test("buildStringsFromRoofFaces: meerdere dakvlakken worden onafhankelijk verdee
   assert.equal(az270.reduce((s, x) => s + x.n, 0), 21);
   assert.deepEqual(az90.map((s) => s.n), [20, 20], "40 panelen bij 20/string past exact in 2 strings");
   assert.equal(az270.length, 2, "21 panelen bij max 20/string moet 2 strings worden (11/10 of gelijkwaardig)");
+});
+
+// --- AC-kabel: aderdikte meterkast → omvormer(s) ----------------------------
+
+test("voltageDropPct: 3-fase, 25A/15m/4mm² conduit — referentiecijfer handmatig nagerekend", () => {
+  // ΔU = √3 × 25 × 15 × (0,0225/4) ≈ 3,65 V → 3,65/400 ≈ 0,91%
+  const pct = voltageDropPct({ crossSection: 4, current: 25, length: 15, phases: 3 });
+  assert.ok(Math.abs(pct - 0.913) < 0.01, `verwacht ~0,91%, kreeg ${pct.toFixed(3)}`);
+});
+
+test("requiredCableCrossSection: korte 3-fase kabel — stroombelastbaarheid is de maatgevende eis", () => {
+  // 25A/15m/conduit(B1): 2,5mm² (21A) is te dun qua stroom, 4mm² (28A) past —
+  // en de spanningsval bij 4mm² (~0,91%) zit ruim onder de 3%-norm.
+  const res = requiredCableCrossSection({ current: 25, length: 15, phases: 3, installMethod: "conduit" });
+  assert.equal(res.crossSection, 4);
+  assert.equal(res.limitedBy, "stroombelastbaarheid");
+  assert.ok(res.voltageDropPct < VOLTAGE_DROP_MAX_PCT);
+});
+
+test("requiredCableCrossSection: lange 3-fase kabel — spanningsval dwingt een dikkere ader af dan stroombelastbaarheid alleen", () => {
+  // 10A/60m/conduit(B1): 1,5mm² (15,5A) kan de stroom wel aan, maar de
+  // spanningsval (~3,90%) overschrijdt de 3%-norm. 2,5mm² (~2,34%) past wel.
+  const res = requiredCableCrossSection({ current: 10, length: 60, phases: 3, installMethod: "conduit" });
+  assert.equal(res.crossSection, 2.5);
+  assert.equal(res.limitedBy, "spanningsval");
+  assert.ok(res.voltageDropPct < VOLTAGE_DROP_MAX_PCT);
+});
+
+test("requiredCableCrossSection: 1-fase ondergronds — 2 aders i.p.v. 3 in de spanningsvalformule", () => {
+  // 16A/25m/buried(D1): 1,5mm² en 2,5mm² halen de stroom prima maar niet de
+  // 3%-spanningsval (230V-basis, factor 2 i.p.v. √3); 4mm² (~1,96%) past.
+  const res = requiredCableCrossSection({ current: 16, length: 25, phases: 1, installMethod: "buried" });
+  assert.equal(res.crossSection, 4);
+  assert.equal(res.limitedBy, "spanningsval");
+});
+
+test("checkAcCable: 1,5mm² op de lange 3-fase kabel faalt specifiek op spanningsval, niet op stroom", () => {
+  const res = checkAcCable({ crossSection: 1.5, current: 10, length: 60, phases: 3, installMethod: "conduit" });
+  assert.equal(res.ampacityOk, true, "1,5mm² (15,5A) kan 10A prima aan");
+  assert.equal(res.voltageDropOk, false, "spanningsval (~3,90%) overschrijdt de 3%-norm");
+  assert.equal(res.pass, false);
+});
+
+test("requiredCableCrossSection: geeft null als geen enkele doorsnede tot 95mm² voldoet", () => {
+  const res = requiredCableCrossSection({ current: 500, length: 15, phases: 3, installMethod: "conduit" });
+  assert.equal(res, null);
 });

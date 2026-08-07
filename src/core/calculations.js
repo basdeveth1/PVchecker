@@ -167,6 +167,83 @@ export function buildStringsFromRoofFaces(roofFaces, nPerString) {
 }
 
 // ----------------------------------------------------------------------------
+// AC-kabel: aderdikte tussen meterkast/verdeelkast en omvormer(s)
+// ----------------------------------------------------------------------------
+// Stroombelastbaarheid uit IEC 60364-5-52, Tabel B.52.4 (PVC-isolatie, koper,
+// 3 belaste aders, geleidertemp. 70°C, omgevingstemp. 30°C lucht / 20°C
+// grond) — bron: ti-soft.com/en/support/help/electricaldesign/standards/
+// iec-60364-5-52/current-carrying-capacity/table_b_52_4 (2026-08-07
+// gecontroleerd tegen de norm-tabel). Voor 1-fase (2 belaste aders) wordt
+// dezelfde tabel gebruikt: dat is een bewuste, conservatieve vereenvoudiging
+// — 2 belaste aders mogen in werkelijkheid iets méér stroom verdragen dan 3
+// (minder onderlinge opwarming), dus dit onderschat de belastbaarheid nooit.
+//
+// Drie vereenvoudigde legmethodes i.p.v. de volledige IEC-taxonomie, elk
+// gekoppeld aan de dichtstbijzijnde IEC-referentiemethode:
+//   - "tray"    → methode C   (kabelgoot/vrije lucht, geclipt op een oppervlak)
+//   - "conduit" → methode B1  (in buis tegen/in een muur)
+//   - "buried"  → methode D1  (rechtstreeks ondergronds)
+export const CABLE_AMPACITY_CU_PVC = {
+  1.5: { tray: 17.5, conduit: 15.5, buried: 18 },
+  2.5: { tray: 24, conduit: 21, buried: 24 },
+  4: { tray: 32, conduit: 28, buried: 30 },
+  6: { tray: 41, conduit: 36, buried: 38 },
+  10: { tray: 57, conduit: 50, buried: 50 },
+  16: { tray: 76, conduit: 68, buried: 64 },
+  25: { tray: 96, conduit: 89, buried: 82 },
+  35: { tray: 119, conduit: 110, buried: 98 },
+  50: { tray: 144, conduit: 134, buried: 116 },
+  70: { tray: 184, conduit: 171, buried: 143 },
+  95: { tray: 223, conduit: 207, buried: 169 },
+};
+
+export const CABLE_CROSS_SECTIONS = Object.keys(CABLE_AMPACITY_CU_PVC)
+  .map(Number)
+  .sort((a, b) => a - b);
+
+// Ω·mm²/m, koper bij ~70°C (ontwerpwaarde, gangbaar in NL-kabelberekeningen).
+const COPPER_RESISTIVITY = 0.0225;
+
+// Vaste norm voor het traject meterkast → omvormer(s) (op verzoek niet
+// instelbaar gemaakt).
+export const VOLTAGE_DROP_MAX_PCT = 3;
+
+// Spanningsval in % voor een gekozen doorsnede, gegeven ontwerpstroom,
+// kabellengte (enkele lengte, niet heen-en-terug) en aantal fasen. Reactantie
+// wordt genegeerd (vereenvoudiging, gangbaar voor doorsnedes tot 95mm²).
+export function voltageDropPct({ crossSection, current, length, phases }) {
+  const r = COPPER_RESISTIVITY / crossSection; // Ω/m
+  const uNom = phases === 1 ? 230 : 400;
+  const factor = phases === 1 ? 2 : Math.sqrt(3);
+  const dU = factor * current * length * r;
+  return (dU / uNom) * 100;
+}
+
+// Kleinste standaarddoorsnede die zowel de stroombelastbaarheid als de
+// 3%-spanningsvalnorm haalt, of null als geen enkele doorsnede tot 95mm²
+// voldoet.
+export function requiredCableCrossSection({ current, length, phases, installMethod }) {
+  const ampacityMin = CABLE_CROSS_SECTIONS.find((cs) => CABLE_AMPACITY_CU_PVC[cs][installMethod] >= current) ?? null;
+  for (const cs of CABLE_CROSS_SECTIONS) {
+    const ampacity = CABLE_AMPACITY_CU_PVC[cs][installMethod];
+    if (ampacity < current) continue;
+    const dU = voltageDropPct({ crossSection: cs, current, length, phases });
+    if (dU > VOLTAGE_DROP_MAX_PCT) continue;
+    return { crossSection: cs, ampacity, voltageDropPct: dU, limitedBy: cs === ampacityMin ? "stroombelastbaarheid" : "spanningsval" };
+  }
+  return null;
+}
+
+// Toetst een specifiek gekozen doorsnede (bijv. wat er al ligt) tegen beide eisen.
+export function checkAcCable({ crossSection, current, length, phases, installMethod }) {
+  const ampacity = CABLE_AMPACITY_CU_PVC[crossSection]?.[installMethod] ?? null;
+  const dU = voltageDropPct({ crossSection, current, length, phases });
+  const ampacityOk = ampacity != null && ampacity >= current;
+  const voltageDropOk = dU <= VOLTAGE_DROP_MAX_PCT;
+  return { crossSection, ampacity, ampacityOk, voltageDropPct: dU, voltageDropOk, pass: ampacityOk && voltageDropOk };
+}
+
+// ----------------------------------------------------------------------------
 // Omvormer zoeken (multi-omvormer, optimalisatie naar 120-150% band)
 // ----------------------------------------------------------------------------
 
