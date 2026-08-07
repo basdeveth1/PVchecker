@@ -13,9 +13,15 @@ import {
   checkLegplan,
   stringVocStc,
   buildStringsFromRoofFaces,
+  distributeSlotsEvenly,
+  splitIntoEqualMpptStrings,
   requiredCableCrossSection,
   CABLE_CROSS_SECTIONS,
+  CABLE_INSTALL_METHODS,
   VOLTAGE_DROP_MAX_PCT,
+  mpptCapacity,
+  totalMpptSlots,
+  minMpptCapacity,
   OVERDIM_MIN,
   OVERDIM_MAX,
 } from "../core/calculations.js";
@@ -103,6 +109,17 @@ function matchExtractedPanel(extracted, availPanels) {
     return fam.includes(fab) || fab.includes(fam.split(" ")[0]);
   });
   return candidates.length === 1 ? candidates[0].id : null;
+}
+
+// Leidt het aantal fasen af uit de familienaam (bevat overal in de database
+// consistent "(1-fase..." of "(3-fase..."). Geen structureel phases-veld op
+// de omvormer zelf — alleen gebruikt als handig, overschrijfbaar voorstel
+// in de AC-kabel-tab, nooit als harde waarheid.
+function phasesFromFamily(family) {
+  if (!family) return null;
+  if (/1-fase/i.test(family)) return 1;
+  if (/3-fase/i.test(family)) return 3;
+  return null;
 }
 
 // Telt een strings-lijst (met opgelost paneel) terug op tot dakvlakken:
@@ -227,7 +244,18 @@ export default function PVConfigurator() {
   // AC-kabel meterkast → omvormer(s): aderdikte-check op basis van de
   // opgetelde uitgangsstroom van het omvormerpark (totalIacMax).
   const [cableLength, setCableLength] = useState(15);
-  const [cableInstallMethod, setCableInstallMethod] = useState("conduit"); // "tray" | "conduit" | "buried"
+  const [cableInstallMethod, setCableInstallMethod] = useState("b1"); // zie CABLE_INSTALL_METHODS
+
+  // Losse "AC-kabel"-tab: zelfde check, maar met een zelf te kiezen stroom
+  // (handmatig A, of via een omvormer uit de database) i.p.v. gekoppeld aan
+  // een lopend ontwerp.
+  const [kabelInputMode, setKabelInputMode] = useState("manual"); // "manual" | "inverter"
+  const [kabelManualCurrent, setKabelManualCurrent] = useState(25);
+  const [kabelInverterId, setKabelInverterId] = useState("");
+  const [kabelInverterCount, setKabelInverterCount] = useState(1);
+  const [kabelPhases, setKabelPhases] = useState(3);
+  const [kabelLength, setKabelLength] = useState(15);
+  const [kabelInstallMethod, setKabelInstallMethod] = useState("b1");
 
   // Indeling: voorstel voor stringverdeling + omvormer uit een ruw legplan
   // (dakvlakken zonder vooraf bepaalde strings) — vult designStrings/designFleet
@@ -427,27 +455,43 @@ export default function PVConfigurator() {
     return requiredCableCrossSection({ current: totalIacMax, length: cableLength, phases: conn.phases, installMethod: cableInstallMethod });
   }, [totalIacMax, cableLength, cableInstallMethod, conn.phases]);
 
+  // Losse "AC-kabel"-tab: stroom komt of uit een handmatig ingevoerde
+  // waarde, of uit een gekozen omvormer (iacMax × aantal) uit de database.
+  const kabelSelectedInverter = availInverters.find((i) => i.id === kabelInverterId) || availInverters[0];
+  const kabelCurrentA =
+    kabelInputMode === "manual" ? Number(kabelManualCurrent) || 0 : (kabelSelectedInverter?.iacMax || 0) * (Number(kabelInverterCount) || 0);
+  const kabelResult = useMemo(() => {
+    if (kabelCurrentA <= 0 || !kabelLength) return null;
+    return requiredCableCrossSection({ current: kabelCurrentA, length: kabelLength, phases: kabelPhases, installMethod: kabelInstallMethod });
+  }, [kabelCurrentA, kabelLength, kabelInstallMethod, kabelPhases]);
+
   // Rapport voor de monteur: label = omvormer.mppt.string, omvormer-cijfer =
   // het doorlopende eenheidsnummer uit designUnits, + Voc STC per string.
+  // Toont ALLE MPPT/string-slots die de omvormer fysiek heeft, ook de
+  // onbenutte — anders lijkt het of een MPPT/string niet bestaat terwijl hij
+  // gewoon leeg is (bijv. de tweede slot van een MPPT met 1 aangesloten string).
   const reportRows = useMemo(() => {
     if (!designFleetAssignment.units.length) return [];
     return designFleetAssignment.units.flatMap((mppts, uIdx) => {
       const unit = designUnits[uIdx];
-      return mppts.flatMap((stringIdxs, mIdx) =>
-        stringIdxs.map((si, sIdxInMppt) => {
-          const s = designStringsResolved[si];
+      return mppts.flatMap((stringIdxs, mIdx) => {
+        const capacity = mpptCapacity(unit.inverter, mIdx);
+        return Array.from({ length: capacity }, (_, sIdxInMppt) => {
+          const si = stringIdxs[sIdxInMppt];
+          const s = si !== undefined ? designStringsResolved[si] : null;
           return {
             label: `${unit.unitNumber}.${mIdx + 1}.${sIdxInMppt + 1}`,
             unitNumber: unit.unitNumber,
             inverterId: unit.inverterId,
             mppt: mIdx + 1,
-            n: s.n,
-            panelId: s.panelId,
-            wp: s.panel.wp,
-            vocStc: stringVocStc(s.panel, s.n),
+            n: s ? s.n : 0,
+            panelId: s ? s.panelId : null,
+            wp: s ? s.panel.wp : null,
+            vocStc: s ? stringVocStc(s.panel, s.n) : null,
+            empty: !s,
           };
-        })
-      );
+        });
+      });
     });
   }, [designFleetAssignment, designUnits, designStringsResolved]);
 
@@ -486,7 +530,14 @@ export default function PVConfigurator() {
     autoTable(doc, {
       startY: y,
       head: [["Omvormer", "MPPT", "String", "Aantal PV", "Wp", "Voc STC (V)"]],
-      body: reportRows.map((r) => [`${r.inverterId} (#${r.unitNumber})`, r.mppt, r.label, r.n, r.wp, r.vocStc.toFixed(1)]),
+      body: reportRows.map((r) => [
+        `${r.inverterId} (#${r.unitNumber})`,
+        r.mppt,
+        r.label,
+        r.empty ? "0 (leeg)" : r.n,
+        r.wp ?? "—",
+        r.vocStc != null ? r.vocStc.toFixed(1) : "—",
+      ]),
     });
     doc.setFontSize(9);
     doc.setTextColor(120);
@@ -687,6 +738,12 @@ export default function PVConfigurator() {
   // lengte die Sollit toevallig aanhield. Hergebruikt dezelfde
   // findMatchingInverters/buildStringsFromRoofFaces als het dakvlak-voorstel,
   // nu met de omvormer als gegeven i.p.v. als zoekresultaat.
+  // Herindeelt de huidige panelen (per dakvlak/oriëntatie) over de gekozen
+  // omvormer, met de panelen zo gelijk mogelijk verdeeld over ALLE
+  // beschikbare MPPT/string-slots (i.p.v. het minimum aantal strings te
+  // pakken en slots ongebruikt te laten) — via distributeSlotsEvenly, met
+  // per dakvlak de Voc-veilige maximale stringlengte (findMatchingInverters)
+  // als harde ondergrens op het aantal slots.
   function recomputeStringsForSelectedInverter() {
     setRecomputeError(null);
     if (designFleet.length !== 1 || designStringsResolved.length === 0) return;
@@ -700,7 +757,7 @@ export default function PVConfigurator() {
       byPanel.get(g.panelId).push({ count: g.count, azimuth: g.azimuth, helling: g.helling });
     }
 
-    const newStrings = [];
+    const groupsWithMax = [];
     const failedPanels = [];
     for (const [panelId, roofFacesForType] of byPanel) {
       const panel = availPanels.find((p) => p.id === panelId);
@@ -710,14 +767,27 @@ export default function PVConfigurator() {
         failedPanels.push(panelId);
         continue;
       }
-      const strings = buildStringsFromRoofFaces(roofFacesForType, matches[0].nPerString).map((s) => ({ ...s, panelId }));
-      newStrings.push(...strings);
+      for (const face of roofFacesForType) {
+        groupsWithMax.push({ panelId, count: face.count, azimuth: face.azimuth, helling: face.helling, maxPerString: matches[0].nPerString });
+      }
     }
 
     if (failedPanels.length > 0) {
       setRecomputeError(`Geen geldige stringlengte gevonden voor ${failedPanels.join(", ")} op ${inverter.id} (×${row.count}) — strings niet aangepast.`);
       return;
     }
+
+    const totalSlots = totalMpptSlots(inverter) * row.count;
+    const allocation = distributeSlotsEvenly(groupsWithMax, totalSlots);
+    if (!allocation) {
+      setRecomputeError(`Te veel panelen voor de beschikbare MPPT-capaciteit van ${inverter.id} (×${row.count}) — strings niet aangepast.`);
+      return;
+    }
+    const cap = minMpptCapacity(inverter);
+    const newStrings = allocation.flatMap((g) =>
+      splitIntoEqualMpptStrings(g.count, cap, g.maxPerString, g.slots).map((n) => ({ n, panelId: g.panelId, azimuth: g.azimuth, helling: g.helling }))
+    );
+
     setDesignStrings(newStrings);
     setDesignManualAssign(null);
     setDesignAssignMode("auto");
@@ -1208,6 +1278,53 @@ export default function PVConfigurator() {
     </button>
   );
 
+  // Gedeeld door de AC-kabel-kaart in "Ontwerp checken" (Resultaat-stap) en
+  // de losse "AC-kabel"-tab — alleen de stroom komt op een andere manier tot
+  // stand, de lengte/legmethode/resultaat-UI is identiek.
+  const renderCableCheck = ({ length, setLength, installMethod, setInstallMethod, result }) => (
+    <>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14 }}>
+        <div>
+          <div style={label}>Kabellengte (m)</div>
+          <input
+            type="number"
+            min="1"
+            value={length}
+            onChange={(e) => setLength(e.target.value === "" ? "" : Number(e.target.value))}
+            style={{ width: 90 }}
+          />
+        </div>
+        <div>
+          <div style={label}>Legmethode</div>
+          <select value={installMethod} onChange={(e) => setInstallMethod(e.target.value)} style={{ width: 340 }}>
+            {CABLE_INSTALL_METHODS.map((m) => (
+              <option key={m.key} value={m.key}>{m.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      {result ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <i className="ti ti-circle-check" style={{ fontSize: 20, color: "var(--color-text-success)" }} aria-hidden="true" />
+          <div style={{ fontSize: 13 }}>
+            Minimaal <b>{result.crossSection} mm²</b> koper (PVC) — belastbaarheid {result.ampacity} A, spanningsval {result.voltageDropPct.toFixed(2)}% (norm ≤{VOLTAGE_DROP_MAX_PCT}%)
+            <span style={muted}> · maatgevend: {result.limitedBy}</span>
+          </div>
+        </div>
+      ) : (
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <i className="ti ti-x" style={{ fontSize: 20, color: "var(--color-text-danger)" }} aria-hidden="true" />
+          <div style={{ fontSize: 13, color: "var(--color-text-danger)" }}>
+            Geen standaarddoorsnede tot {CABLE_CROSS_SECTIONS[CABLE_CROSS_SECTIONS.length - 1]} mm² voldoet bij deze stroom/lengte/legmethode — raadpleeg een elektrotechnisch adviseur.
+          </div>
+        </div>
+      )}
+      <div style={{ fontSize: 11, ...muted, marginTop: 10 }}>
+        Vereenvoudigde indicatie: koper, PVC-isolatie, 3%-spanningsvalnorm vast. Stroombelastbaarheid uit IEC 60364-5-52 (tabel B.52.4). Geen vervanging voor een volledige kabelberekening door een elektrotechnisch adviseur.
+      </div>
+    </>
+  );
+
   // Genummerde stap-indicator (Invoer → Indeling → Resultaat) — rustig en
   // luchtig: één duidelijke plek in het scherm die laat zien waar je bent,
   // in plaats van alles onder elkaar op één lange pagina.
@@ -1381,6 +1498,7 @@ export default function PVConfigurator() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {tabBtn("design", "Ontwerp checken")}
           {tabBtn("find", "Omvormer zoeken")}
+          {tabBtn("kabel", "AC-kabel")}
           {tabBtn("library", "Componenten beheren")}
           {tabBtn("agent", "Agent")}
         </div>
@@ -1833,51 +1951,10 @@ export default function PVConfigurator() {
 
               <div style={{ ...card, marginBottom: 20 }}>
                 <div style={{ fontWeight: 500, marginBottom: 12 }}>AC-kabel meterkast → omvormer(s)</div>
-                <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14 }}>
-                  <div>
-                    <div style={label}>Kabellengte (m)</div>
-                    <input
-                      type="number"
-                      min="1"
-                      value={cableLength}
-                      onChange={(e) => setCableLength(e.target.value === "" ? "" : Number(e.target.value))}
-                      style={{ width: 90 }}
-                    />
-                  </div>
-                  <div>
-                    <div style={label}>Legmethode</div>
-                    <select value={cableInstallMethod} onChange={(e) => setCableInstallMethod(e.target.value)} style={{ width: 260 }}>
-                      <option value="tray">Kabelgoot / vrije lucht</option>
-                      <option value="conduit">In buis tegen/in een wand</option>
-                      <option value="buried">Ondergronds, rechtstreeks in de grond</option>
-                    </select>
-                  </div>
-                  <div>
-                    <div style={label}>Ontwerpstroom</div>
-                    <div style={{ padding: "8px 0", fontSize: 14 }}>
-                      {totalIacMax.toFixed(1)} A · {conn.phases}-fase <span style={muted}>(totale omvormer-uitgang)</span>
-                    </div>
-                  </div>
+                <div style={{ fontSize: 13, ...muted, marginBottom: 14 }}>
+                  Ontwerpstroom: {totalIacMax.toFixed(1)} A · {conn.phases}-fase (totale omvormer-uitgang)
                 </div>
-                {cableResult ? (
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <i className="ti ti-circle-check" style={{ fontSize: 20, color: "var(--color-text-success)" }} aria-hidden="true" />
-                    <div style={{ fontSize: 13 }}>
-                      Minimaal <b>{cableResult.crossSection} mm²</b> koper (PVC) — belastbaarheid {cableResult.ampacity} A, spanningsval {cableResult.voltageDropPct.toFixed(2)}% (norm ≤{VOLTAGE_DROP_MAX_PCT}%)
-                      <span style={muted}> · maatgevend: {cableResult.limitedBy}</span>
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                    <i className="ti ti-x" style={{ fontSize: 20, color: "var(--color-text-danger)" }} aria-hidden="true" />
-                    <div style={{ fontSize: 13, color: "var(--color-text-danger)" }}>
-                      Geen standaarddoorsnede tot {CABLE_CROSS_SECTIONS[CABLE_CROSS_SECTIONS.length - 1]} mm² voldoet bij deze stroom/lengte/legmethode — raadpleeg een elektrotechnisch adviseur.
-                    </div>
-                  </div>
-                )}
-                <div style={{ fontSize: 11, ...muted, marginTop: 10 }}>
-                  Vereenvoudigde indicatie: koper, PVC-isolatie, 3%-spanningsvalnorm vast. Stroombelastbaarheid uit IEC 60364-5-52 (tabel B.52.4). Geen vervanging voor een volledige kabelberekening door een elektrotechnisch adviseur.
-                </div>
+                {renderCableCheck({ length: cableLength, setLength: setCableLength, installMethod: cableInstallMethod, setInstallMethod: setCableInstallMethod, result: cableResult })}
               </div>
 
               {designFleetResults.map(({ unit, result }) => (
@@ -2022,13 +2099,13 @@ export default function PVConfigurator() {
                   </thead>
                   <tbody>
                     {reportRows.map((r) => (
-                      <tr key={r.label} style={{ borderBottom: "0.5px solid var(--color-border-tertiary)" }}>
+                      <tr key={r.label} style={{ borderBottom: "0.5px solid var(--color-border-tertiary)", color: r.empty ? "var(--color-text-secondary)" : "inherit" }}>
                         <td style={{ padding: "6px 8px" }}>{r.inverterId} (#{r.unitNumber})</td>
                         <td style={{ padding: "6px 8px" }}>{r.mppt}</td>
                         <td style={{ padding: "6px 8px", fontWeight: 500 }}>{r.label}</td>
-                        <td style={{ padding: "6px 8px" }}>{r.n}</td>
-                        <td style={{ padding: "6px 8px" }}>{r.wp}</td>
-                        <td style={{ padding: "6px 8px" }}>{r.vocStc.toFixed(1)}</td>
+                        <td style={{ padding: "6px 8px" }}>{r.empty ? "0 — leeg" : r.n}</td>
+                        <td style={{ padding: "6px 8px" }}>{r.wp ?? "—"}</td>
+                        <td style={{ padding: "6px 8px" }}>{r.vocStc != null ? r.vocStc.toFixed(1) : "—"}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -2135,6 +2212,94 @@ export default function PVConfigurator() {
           )}
           <div style={{ fontSize: 12, ...muted, marginTop: 16 }}>
             Verdeling = gelijke strings over alle MPPT's. Bij gemengde oriëntaties of optimizers kan een andere verdeling wenselijk zijn.
+          </div>
+        </>
+      )}
+
+      {/* AC-KABEL (los, niet gekoppeld aan een lopend ontwerp) */}
+      {mode === "kabel" && (
+        <>
+          <div style={{ ...card, marginBottom: 20 }}>
+            <div style={{ fontWeight: 500, marginBottom: 12 }}>Ontwerpstroom</div>
+            <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              <button
+                onClick={() => setKabelInputMode("manual")}
+                style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: kabelInputMode === "manual" ? "var(--color-background-info)" : "transparent", color: kabelInputMode === "manual" ? "var(--color-text-info)" : "var(--color-text-primary)" }}
+              >
+                Vermogen (A) invoeren
+              </button>
+              <button
+                onClick={() => {
+                  setKabelInputMode("inverter");
+                  const p = phasesFromFamily(kabelSelectedInverter?.family);
+                  if (p) setKabelPhases(p);
+                }}
+                style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: kabelInputMode === "inverter" ? "var(--color-background-info)" : "transparent", color: kabelInputMode === "inverter" ? "var(--color-text-info)" : "var(--color-text-primary)" }}
+              >
+                Omvormer kiezen
+              </button>
+            </div>
+            {kabelInputMode === "manual" ? (
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+                <div>
+                  <div style={label}>Stroom (A)</div>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.1"
+                    value={kabelManualCurrent}
+                    onChange={(e) => setKabelManualCurrent(e.target.value === "" ? "" : Number(e.target.value))}
+                    style={{ width: 100 }}
+                  />
+                </div>
+                <div>
+                  <div style={label}>Fasen</div>
+                  <select value={kabelPhases} onChange={(e) => setKabelPhases(Number(e.target.value))} style={{ width: 100 }}>
+                    <option value={1}>1-fase</option>
+                    <option value={3}>3-fase</option>
+                  </select>
+                </div>
+              </div>
+            ) : (
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "flex-end" }}>
+                <div>
+                  <div style={label}>Omvormer</div>
+                  <select
+                    value={kabelSelectedInverter?.id || ""}
+                    onChange={(e) => {
+                      setKabelInverterId(e.target.value);
+                      const inv = availInverters.find((i) => i.id === e.target.value);
+                      const p = phasesFromFamily(inv?.family);
+                      if (p) setKabelPhases(p);
+                    }}
+                    style={{ width: 280 }}
+                  >
+                    {availInverters.map((i) => (
+                      <option key={i.id} value={i.id}>{i.id}{i.label ? ` · ${i.label}` : ""} · {i.iacMax} A</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <div style={label}>Aantal</div>
+                  <input type="number" min={1} step={1} value={kabelInverterCount} onChange={(e) => setKabelInverterCount(e.target.value === "" ? "" : Number(e.target.value))} style={{ width: 70 }} />
+                </div>
+                <div>
+                  <div style={label}>Fasen</div>
+                  <select value={kabelPhases} onChange={(e) => setKabelPhases(Number(e.target.value))} style={{ width: 100 }}>
+                    <option value={1}>1-fase</option>
+                    <option value={3}>3-fase</option>
+                  </select>
+                </div>
+                <div style={{ fontSize: 13, ...muted, padding: "8px 0" }}>
+                  → {kabelCurrentA.toFixed(1)} A totaal
+                </div>
+              </div>
+            )}
+          </div>
+
+          <div style={{ ...card, marginBottom: 20 }}>
+            <div style={{ fontWeight: 500, marginBottom: 12 }}>AC-kabel</div>
+            {renderCableCheck({ length: kabelLength, setLength: setKabelLength, installMethod: kabelInstallMethod, setInstallMethod: setKabelInstallMethod, result: kabelResult })}
           </div>
         </>
       )}

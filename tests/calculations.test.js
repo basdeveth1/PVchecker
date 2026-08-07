@@ -21,12 +21,15 @@ import {
   checkLegplan,
   distributeCounts,
   buildStringsFromRoofFaces,
+  distributeSlotsEvenly,
+  splitIntoEqualMpptStrings,
   mpptCapacity,
   totalMpptSlots,
   minMpptCapacity,
   voltageDropPct,
   requiredCableCrossSection,
   checkAcCable,
+  CABLE_AMPACITY_CU_PVC,
   VOLTAGE_DROP_MAX_PCT,
   OVERDIM_MIN,
 } from "../src/core/calculations.js";
@@ -354,6 +357,89 @@ test("buildStringsFromRoofFaces: meerdere dakvlakken worden onafhankelijk verdee
   assert.equal(az270.length, 2, "21 panelen bij max 20/string moet 2 strings worden (11/10 of gelijkwaardig)");
 });
 
+test("distributeSlotsEvenly: één groep gebruikt alle beschikbare slots (referentiecase GW25K-SDT-30)", () => {
+  // 64 panelen, max 26/string (Voc-veilig), 6 beschikbare MPPT-slots (3
+  // MPPT × 2 strings) — moet alle 6 slots gebruiken i.p.v. het minimum van 3.
+  const res = distributeSlotsEvenly([{ count: 64, maxPerString: 26 }], 6);
+  assert.equal(res[0].slots, 6, "alle 6 beschikbare slots moeten gebruikt worden");
+  assert.deepEqual(distributeCounts(res[0].count, res[0].slots), [11, 11, 11, 11, 10, 10]);
+});
+
+test("distributeSlotsEvenly: twee groepen convergeren naar gelijke gemiddelde stringlengte", () => {
+  // 60 en 20 panelen, ruime maxPerString (niet beperkend), 8 slots totaal —
+  // eerlijke verdeling geeft exact 6:2 slots → 10 panelen/string in beide groepen.
+  const res = distributeSlotsEvenly(
+    [
+      { count: 60, maxPerString: 100 },
+      { count: 20, maxPerString: 100 },
+    ],
+    8
+  );
+  assert.equal(res[0].slots, 6);
+  assert.equal(res[1].slots, 2);
+  assert.deepEqual(distributeCounts(res[0].count, res[0].slots), [10, 10, 10, 10, 10, 10]);
+  assert.deepEqual(distributeCounts(res[1].count, res[1].slots), [10, 10]);
+});
+
+test("distributeSlotsEvenly: Voc-veilig minimum per groep blijft leidend, ook als dat oneerlijk oogt", () => {
+  // Groep A (100 panelen, max 10/string) heeft minstens 10 slots nodig;
+  // groep B (10 panelen, max 100/string) kan met 1 slot. 12 slots totaal →
+  // A krijgt zijn minimum (10) + de rest (1 extra na de gelijkstand), B blijft op 1.
+  const res = distributeSlotsEvenly(
+    [
+      { count: 100, maxPerString: 10 },
+      { count: 10, maxPerString: 100 },
+    ],
+    12
+  );
+  assert.equal(res[0].slots, 11);
+  assert.equal(res[1].slots, 1);
+});
+
+test("distributeSlotsEvenly: geeft null als zelfs het Voc-veilige minimum niet in totalSlots past", () => {
+  const res = distributeSlotsEvenly([{ count: 100, maxPerString: 10 }], 5);
+  assert.equal(res, null);
+});
+
+test("splitIntoEqualMpptStrings: referentiecase — vindt een exact gelijke deling i.p.v. distributeCounts' ±1-afronding", () => {
+  // Regressiecase (2026-08-07): distributeCounts(57, 4) geeft [15,14,14,14]
+  // — 15 en 14 passen niet samen op één MPPT (cap 2). 57 is wel exact
+  // deelbaar door 3 (19 elk), dus dat moet de uitkomst zijn i.p.v. 4 strings
+  // te forceren.
+  const strings = splitIntoEqualMpptStrings(57, 2, 26, 4);
+  assert.deepEqual(strings, [19, 19, 19]);
+});
+
+test("splitIntoEqualMpptStrings: lone group (19 panelen) blijft één string, niet geforceerd in 2", () => {
+  const strings = splitIntoEqualMpptStrings(19, 2, 26, 2);
+  assert.deepEqual(strings, [19]);
+});
+
+test("splitIntoEqualMpptStrings: 64 panelen bij 6 slots — kiest 4 gelijke strings van 16 (past exact)", () => {
+  const strings = splitIntoEqualMpptStrings(64, 2, 26, 6);
+  assert.deepEqual(strings, [16, 16, 16, 16]);
+});
+
+test("splitIntoEqualMpptStrings: alle geretourneerde strings passen samen zonder ongelijke MPPT-paren (autoAssign-check)", () => {
+  // Bouwt de strings, laat autoAssign ze indelen op GW_SDT40-achtige
+  // capaciteit (2/MPPT) en controleert dat geen enkele MPPT ongelijke
+  // strings krijgt — dezelfde eis als de eerdere autoAssign-fix.
+  const lengths = splitIntoEqualMpptStrings(57, 2, 26, 4);
+  const strings = lengths.map((n) => ({ n, panel: JA430, azimuth: 142 }));
+  const result = autoAssign(strings, GW_SDT40);
+  assert.equal(result.overflow, false);
+  for (const mppt of result.mppts) {
+    const uniq = new Set(mppt.map((si) => strings[si].n));
+    assert.ok(uniq.size <= 1, `strings op één MPPT moeten gelijk zijn, kreeg ${[...uniq]}`);
+  }
+});
+
+test("splitIntoEqualMpptStrings: geen exacte deler beschikbaar (58, priemachtig) — veilige terugval zonder ongelijke MPPT's", () => {
+  const strings = splitIntoEqualMpptStrings(58, 2, 26, 4);
+  assert.equal(strings.reduce((s, x) => s + x, 0), 58, "totaal aantal panelen moet behouden blijven");
+  assert.ok(strings.every((s) => s <= 26), "geen string mag de Voc-veilige max overschrijden");
+});
+
 // --- AC-kabel: aderdikte meterkast → omvormer(s) ----------------------------
 
 test("voltageDropPct: 3-fase, 25A/15m/4mm² conduit — referentiecijfer handmatig nagerekend", () => {
@@ -363,39 +449,46 @@ test("voltageDropPct: 3-fase, 25A/15m/4mm² conduit — referentiecijfer handmat
 });
 
 test("requiredCableCrossSection: korte 3-fase kabel — stroombelastbaarheid is de maatgevende eis", () => {
-  // 25A/15m/conduit(B1): 2,5mm² (21A) is te dun qua stroom, 4mm² (28A) past —
-  // en de spanningsval bij 4mm² (~0,91%) zit ruim onder de 3%-norm.
-  const res = requiredCableCrossSection({ current: 25, length: 15, phases: 3, installMethod: "conduit" });
+  // 25A/15m/b1: 2,5mm² (21A) is te dun qua stroom, 4mm² (28A) past — en de
+  // spanningsval bij 4mm² (~0,91%) zit ruim onder de 3%-norm.
+  const res = requiredCableCrossSection({ current: 25, length: 15, phases: 3, installMethod: "b1" });
   assert.equal(res.crossSection, 4);
   assert.equal(res.limitedBy, "stroombelastbaarheid");
   assert.ok(res.voltageDropPct < VOLTAGE_DROP_MAX_PCT);
 });
 
 test("requiredCableCrossSection: lange 3-fase kabel — spanningsval dwingt een dikkere ader af dan stroombelastbaarheid alleen", () => {
-  // 10A/60m/conduit(B1): 1,5mm² (15,5A) kan de stroom wel aan, maar de
-  // spanningsval (~3,90%) overschrijdt de 3%-norm. 2,5mm² (~2,34%) past wel.
-  const res = requiredCableCrossSection({ current: 10, length: 60, phases: 3, installMethod: "conduit" });
+  // 10A/60m/b1: 1,5mm² (15,5A) kan de stroom wel aan, maar de spanningsval
+  // (~3,90%) overschrijdt de 3%-norm. 2,5mm² (~2,34%) past wel.
+  const res = requiredCableCrossSection({ current: 10, length: 60, phases: 3, installMethod: "b1" });
   assert.equal(res.crossSection, 2.5);
   assert.equal(res.limitedBy, "spanningsval");
   assert.ok(res.voltageDropPct < VOLTAGE_DROP_MAX_PCT);
 });
 
-test("requiredCableCrossSection: 1-fase ondergronds — 2 aders i.p.v. 3 in de spanningsvalformule", () => {
-  // 16A/25m/buried(D1): 1,5mm² en 2,5mm² halen de stroom prima maar niet de
+test("requiredCableCrossSection: 1-fase ondergronds rechtstreeks (d2) — 2 aders i.p.v. 3 in de spanningsvalformule", () => {
+  // 16A/25m/d2: 1,5mm² en 2,5mm² halen de stroom prima maar niet de
   // 3%-spanningsval (230V-basis, factor 2 i.p.v. √3); 4mm² (~1,96%) past.
-  const res = requiredCableCrossSection({ current: 16, length: 25, phases: 1, installMethod: "buried" });
+  const res = requiredCableCrossSection({ current: 16, length: 25, phases: 1, installMethod: "d2" });
   assert.equal(res.crossSection, 4);
   assert.equal(res.limitedBy, "spanningsval");
 });
 
+test("requiredCableCrossSection: d1 (mantelbuis) heeft lagere belastbaarheid dan d2 (rechtstreeks) bij dezelfde doorsnede", () => {
+  // Bevestigt het onderscheid tussen de twee ondergrondse methodes: een
+  // kabel rechtstreeks in de grond (d2) mag meer stroom dan dezelfde kabel
+  // in een mantelbuis (d1), want die laatste dissipeert warmte slechter.
+  assert.ok(CABLE_AMPACITY_CU_PVC[16].d2 > CABLE_AMPACITY_CU_PVC[16].d1, "d2 (rechtstreeks) moet hoger zijn dan d1 (mantelbuis) bij 16mm²");
+});
+
 test("checkAcCable: 1,5mm² op de lange 3-fase kabel faalt specifiek op spanningsval, niet op stroom", () => {
-  const res = checkAcCable({ crossSection: 1.5, current: 10, length: 60, phases: 3, installMethod: "conduit" });
+  const res = checkAcCable({ crossSection: 1.5, current: 10, length: 60, phases: 3, installMethod: "b1" });
   assert.equal(res.ampacityOk, true, "1,5mm² (15,5A) kan 10A prima aan");
   assert.equal(res.voltageDropOk, false, "spanningsval (~3,90%) overschrijdt de 3%-norm");
   assert.equal(res.pass, false);
 });
 
 test("requiredCableCrossSection: geeft null als geen enkele doorsnede tot 95mm² voldoet", () => {
-  const res = requiredCableCrossSection({ current: 500, length: 15, phases: 3, installMethod: "conduit" });
+  const res = requiredCableCrossSection({ current: 500, length: 15, phases: 3, installMethod: "b1" });
   assert.equal(res, null);
 });

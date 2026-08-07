@@ -166,6 +166,72 @@ export function buildStringsFromRoofFaces(roofFaces, nPerString) {
   });
 }
 
+// Verdeelt groepen ({ count, maxPerString, ... }) over een vast totaal aantal
+// strings (bijv. alle beschikbare MPPT-slots van een gekozen omvormer(park)),
+// zo gelijk mogelijk qua stringlengte over ALLE groepen heen — i.p.v. per
+// groep onafhankelijk het minimum aantal strings te pakken (zoals
+// buildStringsFromRoofFaces doet), wat MPPT-slots ongebruikt kan laten.
+// Elke groep krijgt eerst het minimum aantal strings dat nodig is om binnen
+// maxPerString te blijven (Voc-veilig); de resterende strings gaan steeds
+// naar de groep met op dat moment de langste gemiddelde string, tot alle
+// totalSlots op zijn. Geeft null als zelfs het minimum niet in totalSlots
+// past.
+export function distributeSlotsEvenly(groups, totalSlots) {
+  if (groups.length === 0) return [];
+  const minSlots = groups.map((g) => Math.max(1, Math.ceil(g.count / g.maxPerString)));
+  const used = minSlots.reduce((a, b) => a + b, 0);
+  if (used > totalSlots) return null;
+  const slots = [...minSlots];
+  let extra = totalSlots - used;
+  while (extra > 0) {
+    let worst = 0;
+    let worstAvg = -Infinity;
+    for (let i = 0; i < groups.length; i++) {
+      const avg = groups[i].count / slots[i];
+      if (avg > worstAvg) {
+        worstAvg = avg;
+        worst = i;
+      }
+    }
+    slots[worst]++;
+    extra--;
+  }
+  return groups.map((g, i) => ({ ...g, slots: slots[i] }));
+}
+
+// Vertaalt een aantal panelen naar concrete stringlengtes voor een omvormer
+// met `cap` strings/MPPT, met als doel zo dicht mogelijk bij `targetSlots`
+// strings te komen (bijv. uit distributeSlotsEvenly) — maar NOOIT ten koste
+// van de eis dat strings op dezelfde MPPT exact gelijke lengte hebben
+// (distributeCounts' ±1-afronding volstaat daar niet voor: 57 panelen over
+// 4 strings geeft bijv. [15,14,14,14], en 15+14 past niet samen op één
+// MPPT). Zoekt daarom terug vanaf targetSlots naar het kleinste aantal
+// strings S (tot het Voc-veilige minimum) waarbij count exact deelbaar is
+// door S — dan zijn alle S strings identiek, dus per definitie geen enkel
+// MPPT ooit ongelijk. Lukt dat nergens (zeldzaam, bijv. een priemgetal),
+// dan de veilige terugval: zo min mogelijk strings op de maximale
+// (Voc-veilige) lengte, net als buildStringsFromRoofFaces.
+export function splitIntoEqualMpptStrings(count, cap, maxPerString, targetSlots) {
+  const minSlots = Math.max(1, Math.ceil(count / maxPerString));
+  for (let s = Math.max(targetSlots, minSlots); s >= minSlots; s--) {
+    if (count % s === 0 && count / s <= maxPerString) {
+      return Array(s).fill(count / s);
+    }
+  }
+  const strings = [];
+  let remaining = count;
+  while (remaining > 0) {
+    if (remaining <= maxPerString) {
+      strings.push(remaining);
+      break;
+    }
+    const k = Math.max(1, Math.min(cap, Math.floor(remaining / maxPerString)));
+    for (let i = 0; i < k; i++) strings.push(maxPerString);
+    remaining -= k * maxPerString;
+  }
+  return strings;
+}
+
 // ----------------------------------------------------------------------------
 // AC-kabel: aderdikte tussen meterkast/verdeelkast en omvormer(s)
 // ----------------------------------------------------------------------------
@@ -173,29 +239,44 @@ export function buildStringsFromRoofFaces(roofFaces, nPerString) {
 // 3 belaste aders, geleidertemp. 70°C, omgevingstemp. 30°C lucht / 20°C
 // grond) — bron: ti-soft.com/en/support/help/electricaldesign/standards/
 // iec-60364-5-52/current-carrying-capacity/table_b_52_4 (2026-08-07
-// gecontroleerd tegen de norm-tabel). Voor 1-fase (2 belaste aders) wordt
-// dezelfde tabel gebruikt: dat is een bewuste, conservatieve vereenvoudiging
-// — 2 belaste aders mogen in werkelijkheid iets méér stroom verdragen dan 3
-// (minder onderlinge opwarming), dus dit onderschat de belastbaarheid nooit.
+// gecontroleerd tegen de norm-tabel, alle 7 kolommen A1/A2/B1/B2/C/D1/D2).
+// Voor 1-fase (2 belaste aders) wordt dezelfde tabel gebruikt: dat is een
+// bewuste, conservatieve vereenvoudiging — 2 belaste aders mogen in
+// werkelijkheid iets méér stroom verdragen dan 3 (minder onderlinge
+// opwarming), dus dit onderschat de belastbaarheid nooit.
 //
-// Drie vereenvoudigde legmethodes i.p.v. de volledige IEC-taxonomie, elk
-// gekoppeld aan de dichtstbijzijnde IEC-referentiemethode:
-//   - "tray"    → methode C   (kabelgoot/vrije lucht, geclipt op een oppervlak)
-//   - "conduit" → methode B1  (in buis tegen/in een muur)
-//   - "buried"  → methode D1  (rechtstreeks ondergronds)
+// Legmethodes = de IEC-referentiemethodes zelf (zie CABLE_INSTALL_METHODS
+// voor de NL-omschrijvingen):
+//   a1 = aders in buis, weggewerkt in een geïsoleerde wand
+//   a2 = kabel in buis, weggewerkt in een geïsoleerde wand
+//   b1 = aders in opbouwbuis tegen/op een wand
+//   b2 = kabel in opbouwbuis tegen/op een wand
+//   c  = kabel vrij/geclipt (kabelgoot, tegen wand of plafond)
+//   d1 = ondergronds in mantelbuis
+//   d2 = ondergronds rechtstreeks (geen mantelbuis)
 export const CABLE_AMPACITY_CU_PVC = {
-  1.5: { tray: 17.5, conduit: 15.5, buried: 18 },
-  2.5: { tray: 24, conduit: 21, buried: 24 },
-  4: { tray: 32, conduit: 28, buried: 30 },
-  6: { tray: 41, conduit: 36, buried: 38 },
-  10: { tray: 57, conduit: 50, buried: 50 },
-  16: { tray: 76, conduit: 68, buried: 64 },
-  25: { tray: 96, conduit: 89, buried: 82 },
-  35: { tray: 119, conduit: 110, buried: 98 },
-  50: { tray: 144, conduit: 134, buried: 116 },
-  70: { tray: 184, conduit: 171, buried: 143 },
-  95: { tray: 223, conduit: 207, buried: 169 },
+  1.5: { a1: 13.5, a2: 13, b1: 15.5, b2: 15, c: 17.5, d1: 18, d2: 19 },
+  2.5: { a1: 18, a2: 17.5, b1: 21, b2: 20, c: 24, d1: 24, d2: 24 },
+  4: { a1: 24, a2: 23, b1: 28, b2: 27, c: 32, d1: 30, d2: 33 },
+  6: { a1: 31, a2: 29, b1: 36, b2: 34, c: 41, d1: 38, d2: 41 },
+  10: { a1: 42, a2: 39, b1: 50, b2: 46, c: 57, d1: 50, d2: 54 },
+  16: { a1: 56, a2: 52, b1: 68, b2: 62, c: 76, d1: 64, d2: 70 },
+  25: { a1: 73, a2: 68, b1: 89, b2: 80, c: 96, d1: 82, d2: 92 },
+  35: { a1: 89, a2: 83, b1: 110, b2: 99, c: 119, d1: 98, d2: 110 },
+  50: { a1: 108, a2: 99, b1: 134, b2: 118, c: 144, d1: 116, d2: 130 },
+  70: { a1: 136, a2: 125, b1: 171, b2: 149, c: 184, d1: 143, d2: 162 },
+  95: { a1: 164, a2: 150, b1: 207, b2: 179, c: 223, d1: 169, d2: 193 },
 };
+
+export const CABLE_INSTALL_METHODS = [
+  { key: "a1", label: "Aders in buis, weggewerkt in geïsoleerde wand (A1)" },
+  { key: "a2", label: "Kabel in buis, weggewerkt in geïsoleerde wand (A2)" },
+  { key: "b1", label: "Aders in opbouwbuis tegen/op een wand (B1)" },
+  { key: "b2", label: "Kabel in opbouwbuis tegen/op een wand (B2)" },
+  { key: "c", label: "Kabelgoot / vrij geclipt tegen wand of plafond (C)" },
+  { key: "d1", label: "Ondergronds, in mantelbuis (D1)" },
+  { key: "d2", label: "Ondergronds, rechtstreeks — geen mantelbuis (D2)" },
+];
 
 export const CABLE_CROSS_SECTIONS = Object.keys(CABLE_AMPACITY_CU_PVC)
   .map(Number)
