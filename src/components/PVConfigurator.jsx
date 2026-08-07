@@ -648,6 +648,25 @@ export default function PVConfigurator() {
     setRoofMatches(null);
   }
 
+  // "Omvormer zoeken" kent geen oriëntatie/helling per string (alleen een
+  // totaal aantal panelen) — bouwt daarom één dakvlak met de standaard
+  // aanname (180°/35°, zelfde default als een nieuwe handmatige string),
+  // door te sturen naar Indeling waar de gebruiker azimuth/helling per
+  // string alsnog kan aanpassen of de nieuwe roofFaces-synchronisatie kan
+  // gebruiken.
+  function sendMatchToDesign(match) {
+    const strings = buildStringsFromRoofFaces([{ count: totalPanels, azimuth: 180, helling: 35 }], match.nPerString).map((s) => ({
+      ...s,
+      panelId: findPanel.id,
+    }));
+    setDesignStrings(strings);
+    setDesignFleet([{ inverterId: match.inverter.id, count: match.invCount }]);
+    setDesignManualAssign(null);
+    setDesignAssignMode("auto");
+    setMode("design");
+    setDesignStep("indeling");
+  }
+
   // Herindelen: neemt de al ingevoerde strings (bijv. uit een Sollit-
   // screenshot in stap 1), telt per paneeltype + oriëntatie/helling het
   // aantal panelen op tot "dakvlakken", en herbouwt de strings met de
@@ -2027,6 +2046,12 @@ export default function PVConfigurator() {
                       Onder de gebruikelijke 120–150%-band — bijv. omdat een vast aantal omvormers is opgegeven dat groter is dan het minimum.
                     </div>
                   )}
+                  <button
+                    onClick={() => sendMatchToDesign(m)}
+                    style={{ marginTop: 10, padding: "6px 14px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500, fontSize: 12 }}
+                  >
+                    Gebruiken in Ontwerp checken
+                  </button>
                 </div>
               ))}
             </div>
