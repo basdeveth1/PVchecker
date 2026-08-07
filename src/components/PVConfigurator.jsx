@@ -262,6 +262,12 @@ export default function PVConfigurator() {
   const [datasheetError, setDatasheetError] = useState(null);
   const [datasheetDraft, setDatasheetDraft] = useState(null); // { familyName, isNewFamily, betaVoc, vsysMax, note, rows: [...] }
 
+  // Opgeslagen datasheet-bestanden per familie (traceerbaarheid — zie
+  // CLAUDE.md: kunnen terugvinden waar een waarde vandaan komt).
+  const [datasheetsList, setDatasheetsList] = useState([]);
+  const [datasheetUploadBusy, setDatasheetUploadBusy] = useState(null); // familienaam die bezig is, of null
+  const datasheetsFetchStarted = useRef(false);
+
   // Screenshot-import: geëxtraheerde strings ter bevestiging.
   const [importBusy, setImportBusy] = useState(false);
   const [importError, setImportError] = useState(null);
@@ -580,6 +586,8 @@ export default function PVConfigurator() {
         body: JSON.stringify({ imageBase64: base64, mediaType }),
       });
       setRoofFaces(data.roofFaces.map((f) => ({ count: f.count ?? 1, azimuth: f.azimuth ?? 180, helling: f.helling ?? 35 })));
+      const matchedPanelId = matchExtractedPanel({ wp: data.panelWp, fabrikant: data.panelFabrikant }, availPanels);
+      if (matchedPanelId) setRoofPanelId(matchedPanelId);
       setRoofMatches(null);
     } catch (e) {
       setRoofImportError(e.message);
@@ -697,6 +705,56 @@ export default function PVConfigurator() {
     }
   }
 
+  // Opgeslagen datasheets ophalen (alleen metadata, niet de bestandsinhoud —
+  // die haalt viewDatasheet apart op zodra iemand er echt op klikt).
+  async function fetchDatasheetsList() {
+    if (datasheetsFetchStarted.current) return;
+    datasheetsFetchStarted.current = true;
+    try {
+      const data = await apiFetch("/api/datasheets");
+      setDatasheetsList(data.datasheets);
+    } catch {
+      datasheetsFetchStarted.current = false;
+    }
+  }
+
+  async function uploadFamilyDatasheet(type, familyName, file) {
+    setDatasheetUploadBusy(familyName);
+    try {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      const [, mimeType, base64] = dataUrl.match(/^data:(.+);base64,(.*)$/) || [];
+      if (!base64) throw new Error("Kon het bestand niet lezen.");
+      await apiFetch("/api/datasheets", {
+        method: "POST",
+        body: JSON.stringify({ type, familyName, filename: file.name, mimeType, fileBase64: base64 }),
+      });
+      const data = await apiFetch("/api/datasheets");
+      setDatasheetsList(data.datasheets);
+    } catch (e) {
+      setAddStatus({ type: "error", message: e.message });
+    } finally {
+      setDatasheetUploadBusy(null);
+    }
+  }
+
+  // Haalt de volledige bestandsinhoud pas op bij het openen — de lijst zelf
+  // bevat alleen metadata, om die aanroep licht te houden.
+  async function viewDatasheet(id) {
+    try {
+      const data = await apiFetch(`/api/datasheets?id=${id}`);
+      const d = data.datasheet;
+      const win = window.open();
+      if (win) win.location.href = `data:${d.mime_type};base64,${d.file_base64}`;
+    } catch (e) {
+      setAddStatus({ type: "error", message: e.message });
+    }
+  }
+
   // Label bewerken/verwijderen op een variant — geldt ongeacht of die variant
   // uit de statische database of via "component toevoegen" komt.
   async function editLabel(type, variantId, currentLabel) {
@@ -722,10 +780,12 @@ export default function PVConfigurator() {
     // (apiFetch vereist een ingelogde gebruiker) nog vóór de login-gate
     // getoond is.
     if (session?.user) fetchCustomComponents();
+    if (session?.user) fetchDatasheetsList();
   }, [session]);
 
   useEffect(() => {
     if (mode === "library") fetchCustomComponents();
+    if (mode === "library") fetchDatasheetsList();
   }, [mode]);
 
   // Gedeeld door het handmatige formulier en de datasheet-bevestigingstabel:
@@ -1948,6 +2008,31 @@ export default function PVConfigurator() {
                           </button>
                         </span>
                       ))}
+                    </div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", marginTop: 12, paddingTop: 10, borderTop: "0.5px solid var(--color-border-tertiary)" }}>
+                      {datasheetsList.filter((d) => d.type === key && d.family_name === f.family).map((d) => (
+                        <button
+                          key={d.id}
+                          onClick={() => viewDatasheet(d.id)}
+                          style={{ fontSize: 11, padding: "4px 8px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-secondary)", display: "inline-flex", alignItems: "center", gap: 4 }}
+                        >
+                          <i className="ti ti-file-text" style={{ fontSize: 13 }} aria-hidden="true" /> {d.filename}
+                        </button>
+                      ))}
+                      <label style={{ fontSize: 11, padding: "4px 8px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)", cursor: "pointer", color: "var(--color-text-secondary)" }}>
+                        {datasheetUploadBusy === f.family ? "Bezig met uploaden…" : "+ Datasheet toevoegen"}
+                        <input
+                          type="file"
+                          accept="application/pdf,image/*"
+                          style={{ display: "none" }}
+                          disabled={datasheetUploadBusy === f.family}
+                          onChange={(e) => {
+                            const file = e.target.files?.[0];
+                            e.target.value = "";
+                            if (file) uploadFamilyDatasheet(key, f.family, file);
+                          }}
+                        />
+                      </label>
                     </div>
                   </div>
                 );

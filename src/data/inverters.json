@@ -22,8 +22,8 @@
         { "id": "GW1000-XS-30", "pmax": 1500, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 1000, "iacMax": 4.6, "available": true },
         { "id": "GW1500-XS-30", "pmax": 2250, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 1500, "iacMax": 6.9, "available": true },
         { "id": "GW2000-XS-30", "pmax": 3000, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 2000, "iacMax": 9.1, "available": true },
-        { "id": "GW2500-XS-30", "pmax": 3750, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 2500, "iacMax": 11.4, "available": true },
-        { "id": "GW3000-XS-30", "pmax": 4500, "vmax": 600, "vmpptMin": 40, "vmpptMax": 450, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 3000, "iacMax": 13.7, "available": true }
+        { "id": "GW2500-XS-30", "pmax": 3750, "vmax": 600, "vmpptMin": 40, "vmpptMax": 550, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 2500, "iacMax": 11.4, "available": true },
+        { "id": "GW3000-XS-30", "pmax": 4500, "vmax": 600, "vmpptMin": 40, "vmpptMax": 550, "imppt": 16, "isc": 25, "nMppt": 1, "stringsPerMppt": 1, "pacNom": 3000, "iacMax": 13.7, "available": true }
       ]
     },
     {
@@ -31,11 +31,16 @@
       "source": "SDT-G3",
       "verified": false,
       "variants": [
-        { "id": "GW25K-SDT-30", "pmax": 45000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 950, "imppt": 40, "isc": 50, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 25000, "iacMax": 37.9, "available": true },
-        { "id": "GW30K-SDT-30", "pmax": 54000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 950, "imppt": 42, "isc": 52.5, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 30000, "iacMax": 45.5, "available": true },
-        { "id": "GW33K-SDT-C30", "pmax": 59400, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 40, "isc": 56, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 33000, "iacMax": 50.1, "available": true },
-        { "id": "GW36K-SDT-C30", "pmax": 64800, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 40, "isc": 56, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 36000, "iacMax": 54.6, "available": true },
-        { "id": "GW40K-SDT-C30", "pmax": 72000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 40, "isc": 56, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 40000, "iacMax": 60.7, "available": true },
+        { "id": "GW10K-SDT-30", "pmax": 15000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 22, "isc": 27.5, "nMppt": 2, "stringsPerMppt": 1, "pacNom": 10000, "iacMax": 16.7, "available": true },
+        { "id": "GW12K-SDT-30", "pmax": 18000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 22, "isc": 27.5, "nMppt": 2, "stringsPerMppt": 1, "pacNom": 12000, "iacMax": 20.0, "available": true },
+        { "id": "GW15K-SDT-30", "pmax": 22500, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 22, "isc": 27.5, "nMppt": 2, "stringsPerMppt": 1, "pacNom": 15000, "iacMax": 25.0, "available": true },
+        { "id": "GW17K-SDT-30", "pmax": 25500, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 22, "isc": 27.5, "nMppt": 2, "stringsPerMppt": [2, 1], "pacNom": 17000, "iacMax": 28.3, "available": true, "note": "MPPT's ongelijk: MPPT1 max 32A/40A(Isc), MPPT2 max 22A/27,5A(Isc) — imppt/isc hier op de laagste (veiligste) waarde gezet, rekenkern kent nog geen per-MPPT stroomlimiet." },
+        { "id": "GW20K-SDT-30", "pmax": 30000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 22, "isc": 27.5, "nMppt": 2, "stringsPerMppt": [2, 1], "pacNom": 20000, "iacMax": 33.3, "available": true, "note": "MPPT's ongelijk: MPPT1 max 32A/40A(Isc), MPPT2 max 22A/27,5A(Isc) — imppt/isc hier op de laagste (veiligste) waarde gezet, rekenkern kent nog geen per-MPPT stroomlimiet." },
+        { "id": "GW25K-SDT-30", "pmax": 45000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 40, "isc": 50, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 25000, "iacMax": 37.9, "available": true },
+        { "id": "GW30K-SDT-30", "pmax": 54000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 950, "imppt": 40, "isc": 50, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 30000, "iacMax": 45.5, "available": true },
+        { "id": "GW33K-SDT-C30", "pmax": 59400, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 32, "isc": 40, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 33000, "iacMax": 50.1, "available": true, "note": "MPPT's ongelijk: MPPT1/2 max 42A/52,5A(Isc), MPPT3 max 32A/40A(Isc) — imppt/isc hier op de laagste (veiligste) waarde gezet, rekenkern kent nog geen per-MPPT stroomlimiet." },
+        { "id": "GW36K-SDT-C30", "pmax": 64800, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 32, "isc": 40, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 36000, "iacMax": 54.6, "available": true, "note": "MPPT's ongelijk: MPPT1/2 max 42A/52,5A(Isc), MPPT3 max 32A/40A(Isc) — imppt/isc hier op de laagste (veiligste) waarde gezet, rekenkern kent nog geen per-MPPT stroomlimiet." },
+        { "id": "GW40K-SDT-C30", "pmax": 72000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 32, "isc": 40, "nMppt": 3, "stringsPerMppt": 2, "pacNom": 40000, "iacMax": 60.7, "available": true, "note": "MPPT's ongelijk: MPPT1/2 max 42A/52,5A(Isc), MPPT3 max 32A/40A(Isc) — imppt/isc hier op de laagste (veiligste) waarde gezet, rekenkern kent nog geen per-MPPT stroomlimiet." },
         { "id": "GW40K-SDT-P30", "pmax": 72000, "vmax": 1100, "vmpptMin": 140, "vmpptMax": 1000, "imppt": 40, "isc": 56, "nMppt": 4, "stringsPerMppt": 2, "pacNom": 40000, "iacMax": 60.6, "available": true }
       ]
     },
@@ -53,10 +58,10 @@
       "source": "alphaess_smile-g3-t4-t10",
       "verified": false,
       "variants": [
-        { "id": "SMILE-G3-T4", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 4000, "iacMax": 7.3, "available": true },
-        { "id": "SMILE-G3-T5", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 5000, "iacMax": 9.1, "available": true },
-        { "id": "SMILE-G3-T6", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 6000, "iacMax": 11.0, "available": true },
-        { "id": "SMILE-G3-T8", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 8000, "iacMax": 14.5, "available": true },
+        { "id": "SMILE-G3-T4", "pmax": 8000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 4000, "iacMax": 7.3, "available": true },
+        { "id": "SMILE-G3-T5", "pmax": 10000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 5000, "iacMax": 9.1, "available": true },
+        { "id": "SMILE-G3-T6", "pmax": 12000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 6000, "iacMax": 11.0, "available": true },
+        { "id": "SMILE-G3-T8", "pmax": 16000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 8000, "iacMax": 14.5, "available": true },
         { "id": "SMILE-G3-T10", "pmax": 20000, "vmax": 1000, "vmpptMin": 140, "vmpptMax": 950, "imppt": 16, "isc": 24, "nMppt": 3, "stringsPerMppt": 1, "pacNom": 10000, "iacMax": 18.1, "available": true }
       ]
     },
@@ -74,11 +79,11 @@
       "source": "SUN2000_MB0",
       "verified": false,
       "variants": [
-        { "id": "SUN2000-12K-MB0", "pmax": 18000, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 12000, "iacMax": 19.1, "available": true },
-        { "id": "SUN2000-15K-MB0", "pmax": 22500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 15000, "iacMax": 23.9, "available": true },
-        { "id": "SUN2000-17K-MB0", "pmax": 25500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 17000, "iacMax": 27.1, "available": true },
-        { "id": "SUN2000-20K-MB0", "pmax": 30000, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 20000, "iacMax": 31.9, "available": true },
-        { "id": "SUN2000-25K-MB0", "pmax": 37500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 20, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 25000, "iacMax": 39.9, "available": true }
+        { "id": "SUN2000-12K-MB0", "pmax": 18000, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 30, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 12000, "iacMax": 19.1, "available": true },
+        { "id": "SUN2000-15K-MB0", "pmax": 22500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 30, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 15000, "iacMax": 23.9, "available": true },
+        { "id": "SUN2000-17K-MB0", "pmax": 25500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 30, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 17000, "iacMax": 27.1, "available": true },
+        { "id": "SUN2000-20K-MB0", "pmax": 30000, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 30, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 20000, "iacMax": 31.9, "available": true },
+        { "id": "SUN2000-25K-MB0", "pmax": 37500, "vmax": 1100, "vmpptMin": 200, "vmpptMax": 1000, "imppt": 30, "isc": 40, "nMppt": 2, "stringsPerMppt": 2, "pacNom": 25000, "iacMax": 39.9, "available": true }
       ]
     },
     {
