@@ -217,6 +217,11 @@ export default function PVConfigurator() {
   const [roofImportError, setRoofImportError] = useState(null);
   const [roofMatches, setRoofMatches] = useState(null); // null tot "Voorstel genereren"
 
+  // Indeling: bestaande strings (bijv. uit een Sollit-screenshot in stap 1)
+  // opnieuw laten verdelen op basis van de omvormer die in het Omvormerpark
+  // is gekozen — i.p.v. de stringlengte die Sollit toevallig aanhield.
+  const [recomputeError, setRecomputeError] = useState(null);
+
   // Rapport-stap: optioneel legplan-screenshot (dataURL) voor in de
   // monteurs-PDF — puur ter illustratie, wordt niet uitgelezen/geëxtraheerd.
   const [reportImage, setReportImage] = useState(null);
@@ -613,6 +618,56 @@ export default function PVConfigurator() {
     setDesignManualAssign(null);
     setDesignAssignMode("auto");
     setRoofMatches(null);
+  }
+
+  // Herindelen: neemt de al ingevoerde strings (bijv. uit een Sollit-
+  // screenshot in stap 1), telt per paneeltype + oriëntatie/helling het
+  // aantal panelen op tot "dakvlakken", en herbouwt de strings met de
+  // stringlengte die het beste bij de gekozen omvormer past — i.p.v. de
+  // lengte die Sollit toevallig aanhield. Hergebruikt dezelfde
+  // findMatchingInverters/buildStringsFromRoofFaces als het dakvlak-voorstel,
+  // nu met de omvormer als gegeven i.p.v. als zoekresultaat.
+  function recomputeStringsForSelectedInverter() {
+    setRecomputeError(null);
+    if (designFleet.length !== 1 || designStringsResolved.length === 0) return;
+    const row = designFleet[0];
+    const inverter = availInverters.find((i) => i.id === row.inverterId);
+    if (!inverter) return;
+
+    const roofFaceGroups = new Map(); // "panelId|azimuth|helling" -> { panelId, azimuth, helling, count }
+    for (const s of designStringsResolved) {
+      const key = `${s.panelId}|${s.azimuth}|${s.helling}`;
+      const g = roofFaceGroups.get(key) || { panelId: s.panelId, azimuth: s.azimuth, helling: s.helling, count: 0 };
+      g.count += s.n;
+      roofFaceGroups.set(key, g);
+    }
+    const byPanel = new Map();
+    for (const g of roofFaceGroups.values()) {
+      if (!byPanel.has(g.panelId)) byPanel.set(g.panelId, []);
+      byPanel.get(g.panelId).push({ count: g.count, azimuth: g.azimuth, helling: g.helling });
+    }
+
+    const newStrings = [];
+    const failedPanels = [];
+    for (const [panelId, roofFacesForType] of byPanel) {
+      const panel = availPanels.find((p) => p.id === panelId);
+      const totalPanels = roofFacesForType.reduce((s, f) => s + f.count, 0);
+      const matches = findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters: [inverter], fixedInvCount: row.count });
+      if (matches.length === 0) {
+        failedPanels.push(panelId);
+        continue;
+      }
+      const strings = buildStringsFromRoofFaces(roofFacesForType, matches[0].nPerString).map((s) => ({ ...s, panelId }));
+      newStrings.push(...strings);
+    }
+
+    if (failedPanels.length > 0) {
+      setRecomputeError(`Geen geldige stringlengte gevonden voor ${failedPanels.join(", ")} op ${inverter.id} (×${row.count}) — strings niet aangepast.`);
+      return;
+    }
+    setDesignStrings(newStrings);
+    setDesignManualAssign(null);
+    setDesignAssignMode("auto");
   }
 
   // Vrije vraag/antwoord: stuurt de hele gespreksgeschiedenis + de huidige
@@ -1568,9 +1623,23 @@ export default function PVConfigurator() {
                   <button onClick={addFleetRow} style={{ fontSize: 12, padding: "4px 10px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-primary)", marginBottom: 8 }}>
                     <i className="ti ti-plus" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} /> Omvormertype toevoegen
                   </button>
-                  <div style={{ fontSize: 12, ...muted }}>
+                  <div style={{ fontSize: 12, ...muted, marginBottom: 8 }}>
                     Totaal: {designUnits.length} eenhe{designUnits.length === 1 ? "id" : "den"} · {designUnits.reduce((s, u) => s + u.inverter.nMppt, 0)} MPPT-slots
                   </div>
+                  {designFleet.length === 1 && designStrings.length > 0 && (
+                    <>
+                      <button
+                        onClick={recomputeStringsForSelectedInverter}
+                        style={{ fontSize: 12, padding: "5px 10px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-primary)" }}
+                      >
+                        <i className="ti ti-refresh" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} /> Strings herindelen voor deze omvormer
+                      </button>
+                      <div style={{ fontSize: 11, ...muted, marginTop: 4 }}>
+                        Telt de huidige strings op per dakvlak (paneeltype + oriëntatie + helling) en kiest de beste stringlengte voor {designFleet[0].inverterId}.
+                      </div>
+                      {recomputeError && <div style={{ fontSize: 12, color: "var(--color-text-danger)", marginTop: 6 }}>{recomputeError}</div>}
+                    </>
+                  )}
                 </div>
                 <div style={card}>
                   <div style={label}>Toewijzing strings → MPPT</div>
