@@ -238,9 +238,15 @@ export function autoAssign(strings, inverter) {
   const ordered = Object.values(byAz).sort((a, b) => b.length - a.length).flat();
   for (const si of ordered) {
     const az = strings[si].azimuth;
-    let target = mppts.findIndex((m, idx) => m.length < mpptCapacity(inverter, idx) && m.length > 0 && strings[m[0]].azimuth === az);
+    const n = strings[si].n;
+    // Strings die parallel op dezelfde MPPT komen te staan moeten elektrisch
+    // gelijke lengte hebben (anders stuurt de kortste string de hele
+    // parallelcombinatie) — nooit combineren op basis van oriëntatie alleen.
+    let target = mppts.findIndex(
+      (m, idx) => m.length < mpptCapacity(inverter, idx) && m.length > 0 && strings[m[0]].azimuth === az && strings[m[0]].n === n
+    );
     if (target === -1) target = mppts.findIndex((m) => m.length === 0);
-    if (target === -1) target = mppts.findIndex((m, idx) => m.length < mpptCapacity(inverter, idx));
+    if (target === -1) target = mppts.findIndex((m, idx) => m.length < mpptCapacity(inverter, idx) && strings[m[0]].n === n);
     if (target === -1) return { mppts, overflow: true };
     mppts[target].push(si);
   }
@@ -270,12 +276,19 @@ export function autoAssignFleet(strings, units) {
 
   for (const si of ordered) {
     const az = strings[si].azimuth;
+    const n = strings[si].n;
+    // Zelfde regel als autoAssign: nooit strings van ongelijke lengte samen
+    // op één MPPT (parallel) zetten, ook niet als fallback zonder oriëntatie-match.
     let target = slots.find((s) => {
       const a = arrOf(s);
-      return a.length > 0 && a.length < s.cap && strings[a[0]].azimuth === az;
+      return a.length > 0 && a.length < s.cap && strings[a[0]].azimuth === az && strings[a[0]].n === n;
     });
     if (!target) target = slots.find((s) => arrOf(s).length === 0);
-    if (!target) target = slots.find((s) => arrOf(s).length < s.cap);
+    if (!target)
+      target = slots.find((s) => {
+        const a = arrOf(s);
+        return a.length > 0 && a.length < s.cap && strings[a[0]].n === n;
+      });
     if (!target) return { units: unitMppts, overflow: true };
     arrOf(target).push(si);
   }

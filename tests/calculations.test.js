@@ -241,6 +241,43 @@ test("autoAssign: vult de MPPT met capaciteit 1 eerst, de rest gaat naar de MPPT
   assert.equal(result.mppts[1].length, 2, "de overige 2 gaan naar MPPT 2 (capaciteit 2)");
 });
 
+test("autoAssign: strings met ongelijke lengte mogen nooit samen op één MPPT (elektrisch ongeldig)", () => {
+  // Referentiecase (2026-08-07): "Gebruiken in Ontwerp checken" leverde voor
+  // GW25K-SDT-30 (2 strings/MPPT) een voorstel met 22+21 panelen samen op
+  // MPPT 1 — ongelijke strings parallel op één MPPT kan niet. De twee
+  // 21-panelen-strings moeten samen op één MPPT komen, de 22 moet alleen
+  // staan (desnoods met een lege tweede slot).
+  const strings = [
+    { n: 22, panel: JA430, azimuth: 180 },
+    { n: 21, panel: JA430, azimuth: 180 },
+    { n: 21, panel: JA430, azimuth: 180 },
+  ];
+  const result = autoAssign(strings, GW_SDT40); // 4 MPPT × 2 strings/MPPT
+  assert.equal(result.overflow, false);
+  for (const mppt of result.mppts) {
+    const lengths = new Set(mppt.map((si) => strings[si].n));
+    assert.ok(lengths.size <= 1, `strings op één MPPT moeten gelijke lengte hebben, kreeg ${[...lengths]}`);
+  }
+  const pairedMppt = result.mppts.find((m) => m.length === 2);
+  assert.ok(pairedMppt, "de twee 21-panelen strings moeten samen op één MPPT komen");
+  assert.deepEqual(pairedMppt.map((si) => strings[si].n).sort(), [21, 21]);
+});
+
+test("autoAssignFleet: strings met ongelijke lengte mogen nooit samen op één MPPT", () => {
+  const strings = [
+    { n: 22, panel: JA430, azimuth: 180 },
+    { n: 21, panel: JA430, azimuth: 180 },
+    { n: 21, panel: JA430, azimuth: 180 },
+  ];
+  const units = [{ inverter: GW_SDT40 }];
+  const result = autoAssignFleet(strings, units);
+  assert.equal(result.overflow, false);
+  for (const mppt of result.units[0]) {
+    const lengths = new Set(mppt.map((si) => strings[si].n));
+    assert.ok(lengths.size <= 1, `strings op één MPPT moeten gelijke lengte hebben, kreeg ${[...lengths]}`);
+  }
+});
+
 // --- Vloot van omvormer-eenheden (multi-omvormer, echte mix) -----------------
 
 test("autoAssignFleet: 2 eenheden van hetzelfde type — tweede pas gevuld als eerste vol is", () => {
