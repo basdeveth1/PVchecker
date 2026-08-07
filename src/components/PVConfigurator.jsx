@@ -840,12 +840,27 @@ export default function PVConfigurator() {
   // Haalt de volledige bestandsinhoud pas op bij het openen — de lijst zelf
   // bevat alleen metadata, om die aanroep licht te houden.
   async function viewDatasheet(id) {
+    // Tabblad synchroon openen (vóór de await) — browsers blokkeren een
+    // window.open() die pas ná een async fetch komt, ook al lijkt het qua
+    // tijd nog bij dezelfde klik te horen.
+    const win = window.open();
+    if (!win) {
+      setAddStatus({ type: "error", message: "Pop-up geblokkeerd — sta pop-ups toe om de datasheet te openen." });
+      return;
+    }
     try {
       const data = await apiFetch(`/api/datasheets?id=${id}`);
       const d = data.datasheet;
-      const win = window.open();
-      if (win) win.location.href = `data:${d.mime_type};base64,${d.file_base64}`;
+      // Browsers blokkeren top-level navigatie naar data:-URI's (anti-
+      // phishing-maatregel) — het geopende tabblad bleef daardoor leeg.
+      // Een blob:-URL mag wel.
+      const byteChars = atob(d.file_base64);
+      const bytes = new Uint8Array(byteChars.length);
+      for (let i = 0; i < byteChars.length; i++) bytes[i] = byteChars.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes], { type: d.mime_type }));
+      win.location.href = url;
     } catch (e) {
+      win.close();
       setAddStatus({ type: "error", message: e.message });
     }
   }
