@@ -520,6 +520,18 @@ test("splitIntoEqualMpptStrings: geen exacte deler beschikbaar (58, priemachtig)
   assert.ok(strings.every((s) => s <= 26), "geen string mag de Voc-veilige max overschrijden");
 });
 
+test("splitIntoEqualMpptStrings: terugval vult MPPT's per stuk i.p.v. de rest in één lange string te dumpen", () => {
+  // Referentiecase (2026-09-19): bij een bewust hoog aantal omvormers
+  // (dus een grote targetSlots) kon de oude terugval de rest zodra die onder
+  // maxPerString paste als ÉÉN string wegzetten, waardoor de tweede helft
+  // van de laatste MPPT (en dus MPPT's/omvormers erna) leeg bleef. Voor 58
+  // panelen (geen nette deler) moet nu [26,26,3,3] uitkomen — beide MPPT's
+  // (2 strings/MPPT) volledig gebruikt — i.p.v. het oude [26,26,6] (tweede
+  // MPPT maar half gevuld).
+  const strings = splitIntoEqualMpptStrings(58, 2, 26, 4);
+  assert.deepEqual(strings, [26, 26, 3, 3]);
+});
+
 // --- AC-kabel: aderdikte meterkast → omvormer(s) ----------------------------
 
 test("voltageDropPct: 3-fase, 25A/15m/4mm² conduit — referentiecijfer handmatig nagerekend", () => {

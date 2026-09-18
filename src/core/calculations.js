@@ -226,16 +226,34 @@ export function splitIntoEqualMpptStrings(count, cap, maxPerString, targetSlots)
       return Array(s).fill(count / s);
     }
   }
+  // Geen exacte gelijke verdeling over het hele aantal gevonden — vul MPPT's
+  // één voor één, per MPPT de grootste exacte gelijke deling (of anders de
+  // grootste veilige gelijke deling). Dit gebruikt structureel meer MPPT's
+  // dan de oude aanpak (die de hele rest in één lange string dumpte zodra
+  // die onder maxPerString paste) — belangrijk zodra targetSlots groot is
+  // (bijv. bij een bewust hoog aantal omvormers), anders blijven latere
+  // omvormers ten onrechte helemaal leeg.
   const strings = [];
   let remaining = count;
   while (remaining > 0) {
-    if (remaining <= maxPerString) {
-      strings.push(remaining);
-      break;
+    let placed = false;
+    for (let k = cap; k >= 1 && !placed; k--) {
+      if (remaining % k === 0 && remaining / k <= maxPerString) {
+        for (let i = 0; i < k; i++) strings.push(remaining / k);
+        remaining = 0;
+        placed = true;
+      }
     }
-    const k = Math.max(1, Math.min(cap, Math.floor(remaining / maxPerString)));
-    for (let i = 0; i < k; i++) strings.push(maxPerString);
-    remaining -= k * maxPerString;
+    if (!placed) {
+      for (let k = cap; k >= 1 && !placed; k--) {
+        const len = Math.min(maxPerString, Math.floor(remaining / k));
+        if (len >= 1) {
+          for (let i = 0; i < k; i++) strings.push(len);
+          remaining -= k * len;
+          placed = true;
+        }
+      }
+    }
   }
   return strings;
 }

@@ -452,8 +452,7 @@ export default function PVConfigurator() {
   }, [designUnits, activeStringsResolved, designFleetAssignment, tMinCold, tMaxHot]);
 
   // DC/AC-overdimensionering per omvormerpark-rij (type + aantal), op basis
-  // van het Wp dat op dit moment daadwerkelijk aan die eenheden toegewezen is
-  // — zelfde weergave als "Omvormer zoeken", maar dan per rij in de vloot.
+  // van het Wp dat op dit moment daadwerkelijk aan die eenheden toegewezen is.
   const designFleetRowStats = useMemo(() => {
     const stats = [];
     let uIdx = 0;
@@ -486,6 +485,14 @@ export default function PVConfigurator() {
   const designFleetPass = designFleetResults.length > 0 && !designFleetAssignment.overflow && designFleetResults.every((r) => r.result.pass);
   const designAnyMixed = designFleetResults.some((r) => r.result.anyMixed);
   const designAnyPowerNotOk = designFleetResults.some((r) => !r.result.powerOk);
+  // Signaleert expliciet als er minder omvormers daadwerkelijk panelen
+  // krijgen dan er in het omvormerpark staan (bijv. omdat het aantal
+  // panelen bij deze stringlengte gewoonweg geen 10 omvormers vult) — i.p.v.
+  // dat een omvormer stilzwijgend leeg blijft zonder duidelijke reden.
+  const designUnusedUnitCount = designUnits.filter((u, uIdx) => {
+    const mppts = designFleetAssignment.units[uIdx] || [];
+    return mppts.every((m) => m.length === 0);
+  }).length;
   const designTotalWp = activeStringsResolved.reduce((s, x) => s + x.n * x.panel.wp, 0);
   const totalIacMax = designUnits.reduce((sum, u) => sum + u.inverter.iacMax, 0);
   const fleetFitsConn = designUnits.length === 0 || inverterFitsConnection(totalIacMax, conn.amps);
@@ -1911,6 +1918,12 @@ export default function PVConfigurator() {
                   <div style={{ fontSize: 12, ...muted, marginBottom: 8 }}>
                     Totaal: {designUnits.length} eenhe{designUnits.length === 1 ? "id" : "den"} · {designUnits.reduce((s, u) => s + u.inverter.nMppt, 0)} MPPT-slots
                   </div>
+                  {designAssignMode === "auto" && designUnusedUnitCount > 0 && (
+                    <div style={{ fontSize: 12, color: "var(--color-text-warning)", marginBottom: 8 }}>
+                      <i className="ti ti-alert-triangle" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} />
+                      {designUnusedUnitCount} van de {designUnits.length} omvormers krijgt{designUnusedUnitCount === 1 ? "" : "en"} geen panelen toegewezen — bij dit aantal panelen en deze stringlengte zijn niet alle omvormers nodig. Verklein het aantal omvormers, of gebruik "Strings herindelen" met een kortere stringlengte om ze wel allemaal te benutten.
+                    </div>
+                  )}
                   {designFleet.length === 1 && designStrings.length > 0 && (
                     <>
                       <button
@@ -2079,10 +2092,13 @@ export default function PVConfigurator() {
                   {(designTotalWp / 1000).toFixed(2)} kWp · {designStrings.reduce((s, x) => s + x.n, 0)} panelen · {designUnits.length} omvormereenhe{designUnits.length === 1 ? "id" : "den"}
                   {designAnyMixed && <span> · let op: gemengde oriëntatie op ≥1 MPPT — optimizers nodig</span>}
                   {designAnyPowerNotOk && <span> · DC-vermogen boven omvormerlimiet op ≥1 eenheid</span>}
+                  {designAssignMode === "auto" && designUnusedUnitCount > 0 && (
+                    <span> · {designUnusedUnitCount} van de {designUnits.length} omvormers krijgt{designUnusedUnitCount === 1 ? "" : "en"} geen panelen (niet nodig bij dit aantal panelen/stringlengte)</span>
+                  )}
                 </div>
                 {(designFleetAssignment.overflow || !designFleetPass) && (
                   <div style={{ fontSize: 12, marginTop: 8, color: "var(--color-text-danger)" }}>
-                    Past niet? Pas het omvormerpark in de Indeling-stap aan, of gebruik "Omvormer zoeken" om te zien welke omvormer(s) wél passen bij dit aantal panelen.
+                    Past niet? Pas het omvormerpark in de Indeling-stap aan, of ga terug naar Invoer om de dakvlakken opnieuw te laten matchen met een ander aantal omvormers.
                   </div>
                 )}
               </div>
