@@ -12,7 +12,6 @@ import {
   autoAssignFleet,
   checkLegplan,
   stringVocStc,
-  buildStringsFromRoofFaces,
   distributeSlotsEvenly,
   splitIntoEqualMpptStrings,
   requiredCableCrossSection,
@@ -22,6 +21,8 @@ import {
   mpptCapacity,
   totalMpptSlots,
   minMpptCapacity,
+  DEFAULT_AZIMUTH_TOLERANCE,
+  DEFAULT_TILT_TOLERANCE,
   OVERDIM_MIN,
   OVERDIM_MAX,
 } from "../core/calculations.js";
@@ -45,16 +46,18 @@ const label = { fontSize: 13, color: "var(--color-text-secondary)", marginBottom
 
 // Vergelijkingsoperator per check-key, voor weergave naast de limiet
 // (checkConfig/checkLegplan geven alleen de rauwe limietwaarde + pass terug).
-const CHECK_OPS = { vocCold: "<", vocStc: "<", vmpCold: "≤", vmpHot: "≥", imp: "≤", isc: "≤", strings: "≤" };
+const CHECK_OPS = { vocCold: "<", vocStc: "<", vmpCold: "≤", vmpHot: "≥", imp: "≤", isc: "≤", strings: "≤", equalStrings: "=" };
 
 function fmtCheckValue(c) {
   const decimals = c.unit === "V" ? 0 : c.unit === "A" ? 1 : 0;
-  return `${c.value.toFixed(decimals)}${c.unit ? " " + c.unit : ""}`;
+  const value = typeof c.value === "number" ? c.value.toFixed(decimals) : c.value;
+  return `${value}${c.unit ? " " + c.unit : ""}`;
 }
 function fmtCheckLimit(c) {
   const decimals = c.unit === "V" ? 0 : c.unit === "A" ? 1 : 0;
   const op = CHECK_OPS[c.key] || "≤";
-  return `${op} ${c.limit.toFixed(decimals)}${c.unit ? " " + c.unit : ""}`;
+  const limit = typeof c.limit === "number" ? c.limit.toFixed(decimals) : c.limit;
+  return `${op} ${limit}${c.unit ? " " + c.unit : ""}`;
 }
 
 // Variant-velden voor het "component toevoegen"-formulier — zelfde velden
@@ -134,6 +137,24 @@ function collapseStringsToRoofFaces(stringsResolved) {
     groups.set(key, g);
   }
   return [...groups.values()];
+}
+
+// Terugwaartse compatibiliteit: eerder opgeslagen configuraties bewaarden
+// handmatige toewijzing als indices-per-MPPT ([unitIdx][mpptIdx] =
+// [stringIdx,...]) tegen de toen geldende designStrings-lijst. Zet dat om
+// naar het nieuwe, zelfstandige slot-formaat bij het laden.
+function manualAssignToManualStrings(manualAssign, strings) {
+  if (!manualAssign) return [];
+  const out = [];
+  manualAssign.forEach((perUnit, uIdx) => {
+    (perUnit || []).forEach((stringIdxs, mIdx) => {
+      (stringIdxs || []).forEach((si, slotIdx) => {
+        const s = strings[si];
+        if (s) out.push({ unitIdx: uIdx, mpptIdx: mIdx, slotIdx, panelId: s.panelId, n: s.n, azimuth: s.azimuth, helling: s.helling });
+      });
+    });
+  });
+  return out;
 }
 
 const DESIGN_STEPS = [
@@ -239,7 +260,16 @@ export default function PVConfigurator() {
   // van verschillende typen, uitgeklapt tot genummerde eenheden (designUnits).
   const [designFleet, setDesignFleet] = useState([{ inverterId: "SUN2000-20K-MB0", count: 1 }]);
   const [designAssignMode, setDesignAssignMode] = useState("auto"); // "auto" | "manual"
-  const [designManualAssign, setDesignManualAssign] = useState(null); // [unitIdx][mpptIdx] = [stringIdx,...]
+  // Echte handmatige invoer: per MPPT-slot rechtstreeks paneeltype + aantal
+  // (+ oriëntatie/helling) intypen, i.p.v. voorgedefinieerde strings uit stap
+  // 1 aan/uit te vinken. Eén item per ingevulde slot; slots zonder item of
+  // met n=0 tellen als leeg.
+  const [designManualStrings, setDesignManualStrings] = useState([]); // { unitIdx, mpptIdx, slotIdx, panelId, n, azimuth, helling }[]
+  // Toleranties waarbinnen automatisch toewijzen twee strings van enigszins
+  // afwijkende oriëntatie/helling toch op één MPPT mag combineren — default
+  // uit de rekenkern, hier aanpasbaar per ontwerp.
+  const [azimuthTolerance, setAzimuthTolerance] = useState(DEFAULT_AZIMUTH_TOLERANCE);
+  const [tiltTolerance, setTiltTolerance] = useState(DEFAULT_TILT_TOLERANCE);
 
   // AC-kabel meterkast → omvormer(s): aderdikte-check op basis van de
   // opgetelde uitgangsstroom van het omvormerpark (totalIacMax).
@@ -355,6 +385,20 @@ export default function PVConfigurator() {
     [designStrings, availPanels]
   );
 
+  // Handmatige slot-invoer, zelfde vorm als designStringsResolved (+ eigen
+  // plaatsing) — alleen ingevulde slots (n>0, paneeltype gekozen) tellen mee.
+  const manualStringsResolved = useMemo(
+    () =>
+      designManualStrings
+        .filter((s) => s.n > 0 && s.panelId)
+        .map((s) => ({ ...s, panel: availPanels.find((p) => p.id === s.panelId) || availPanels[0] })),
+    [designManualStrings, availPanels]
+  );
+
+  // De strings-lijst die daadwerkelijk telt voor MPPT-toewijzing/checks/
+  // rapport: in handmatige modus de losse slot-invoer, anders stap 1's lijst.
+  const activeStringsResolved = designAssignMode === "manual" ? manualStringsResolved : designStringsResolved;
+
   // Houdt de dakvlak-tabel in de Indeling-stap ("Nog geen stringverdeling?")
   // synchroon met het actieve ontwerp — anders blijft daar een sinds het
   // laden van de pagina ongewijzigd standaardvoorbeeld staan, los van wat er
@@ -383,15 +427,23 @@ export default function PVConfigurator() {
 
   const designFleetAssignment = useMemo(() => {
     if (designUnits.length === 0) return { units: [], overflow: false };
-    if (designAssignMode === "manual" && designManualAssign) {
-      const units = designUnits.map((u, uIdx) => {
-        const perUnit = designManualAssign[uIdx] || [];
-        return Array.from({ length: u.inverter.nMppt }, (_, mIdx) => perUnit[mIdx] || []);
-      });
-      return { units, overflow: designStrings.length !== units.flat(2).length };
+    if (designAssignMode === "manual") {
+      // De slot-invoer draagt haar eigen plaatsing (unitIdx/mpptIdx/slotIdx),
+      // dus gewoon per MPPT verzamelen en op slotIdx sorteren — geen
+      // toewijzingsalgoritme nodig, de gebruiker heeft het al bepaald.
+      const units = designUnits.map((u, uIdx) =>
+        Array.from({ length: u.inverter.nMppt }, (_, mIdx) =>
+          manualStringsResolved
+            .map((s, gi) => ({ ...s, gi }))
+            .filter((s) => s.unitIdx === uIdx && s.mpptIdx === mIdx)
+            .sort((a, b) => a.slotIdx - b.slotIdx)
+            .map((s) => s.gi)
+        )
+      );
+      return { units, overflow: false };
     }
-    return autoAssignFleet(designStringsResolved, designUnits);
-  }, [designAssignMode, designManualAssign, designStringsResolved, designUnits, designStrings.length]);
+    return autoAssignFleet(designStringsResolved, designUnits, { azimuthTol: azimuthTolerance, tiltTol: tiltTolerance });
+  }, [designAssignMode, manualStringsResolved, designStringsResolved, designUnits, azimuthTolerance, tiltTolerance]);
 
   // checkLegplan blijft ongewijzigd, gewoon één keer per eenheid aangeroepen —
   // maar wel met alleen déze eenheid se eigen strings (lokaal herindexeerd),
@@ -399,17 +451,17 @@ export default function PVConfigurator() {
   // eenheid het totaal van de HELE vloot vergelijken met de limiet van één
   // eenheid.
   const designFleetResults = useMemo(() => {
-    if (designUnits.length === 0 || designStringsResolved.length === 0) return [];
+    if (designUnits.length === 0 || activeStringsResolved.length === 0) return [];
     return designUnits.map((unit, uIdx) => {
       const unitMppts = designFleetAssignment.units[uIdx] || [];
       const globalIdxs = unitMppts.flat();
-      const unitStrings = globalIdxs.map((gi) => designStringsResolved[gi]);
+      const unitStrings = globalIdxs.map((gi) => activeStringsResolved[gi]);
       const localIndexOf = new Map(globalIdxs.map((gi, li) => [gi, li]));
       const localMppts = unitMppts.map((idxs) => idxs.map((gi) => localIndexOf.get(gi)));
       const result = checkLegplan(unitStrings, unit.inverter, { mppts: localMppts, overflow: false }, tMinCold, tMaxHot);
       return { unit, result };
     });
-  }, [designUnits, designStringsResolved, designFleetAssignment, tMinCold, tMaxHot]);
+  }, [designUnits, activeStringsResolved, designFleetAssignment, tMinCold, tMaxHot]);
 
   // DC/AC-overdimensionering per omvormerpark-rij (type + aantal), op basis
   // van het Wp dat op dit moment daadwerkelijk aan die eenheden toegewezen is
@@ -423,7 +475,7 @@ export default function PVConfigurator() {
         const mppts = designFleetAssignment.units[uIdx + k] || [];
         for (const stringIdxs of mppts) {
           for (const si of stringIdxs) {
-            const s = designStringsResolved[si];
+            const s = activeStringsResolved[si];
             if (s) assignedWp += s.n * s.panel.wp;
           }
         }
@@ -441,12 +493,12 @@ export default function PVConfigurator() {
       uIdx += row.count;
     }
     return stats;
-  }, [designFleet, designUnits, designFleetAssignment, designStringsResolved]);
+  }, [designFleet, designUnits, designFleetAssignment, activeStringsResolved]);
 
   const designFleetPass = designFleetResults.length > 0 && !designFleetAssignment.overflow && designFleetResults.every((r) => r.result.pass);
   const designAnyMixed = designFleetResults.some((r) => r.result.anyMixed);
   const designAnyPowerNotOk = designFleetResults.some((r) => !r.result.powerOk);
-  const designTotalWp = designStringsResolved.reduce((s, x) => s + x.n * x.panel.wp, 0);
+  const designTotalWp = activeStringsResolved.reduce((s, x) => s + x.n * x.panel.wp, 0);
   const totalIacMax = designUnits.reduce((sum, u) => sum + u.inverter.iacMax, 0);
   const fleetFitsConn = designUnits.length === 0 || inverterFitsConnection(totalIacMax, conn.amps);
 
@@ -478,7 +530,7 @@ export default function PVConfigurator() {
         const capacity = mpptCapacity(unit.inverter, mIdx);
         return Array.from({ length: capacity }, (_, sIdxInMppt) => {
           const si = stringIdxs[sIdxInMppt];
-          const s = si !== undefined ? designStringsResolved[si] : null;
+          const s = si !== undefined ? activeStringsResolved[si] : null;
           return {
             label: `${unit.unitNumber}.${mIdx + 1}.${sIdxInMppt + 1}`,
             unitNumber: unit.unitNumber,
@@ -493,7 +545,7 @@ export default function PVConfigurator() {
         });
       });
     });
-  }, [designFleetAssignment, designUnits, designStringsResolved]);
+  }, [designFleetAssignment, designUnits, activeStringsResolved]);
 
   async function handleReportImageFile(file) {
     const dataUrl = await new Promise((resolve, reject) => {
@@ -564,7 +616,7 @@ export default function PVConfigurator() {
       return;
     }
     try {
-      const payload = { strings: designStrings, fleet: designFleet, assignMode: designAssignMode, manualAssign: designManualAssign, tMinCold, tMaxHot, connId };
+      const payload = { strings: designStrings, fleet: designFleet, assignMode: designAssignMode, manualStrings: designManualStrings, tMinCold, tMaxHot, connId };
       await apiFetch("/api/configs", {
         method: "POST",
         body: JSON.stringify({ name: saveName.trim(), sollitId: saveSollitId.trim(), payload }),
@@ -584,14 +636,18 @@ export default function PVConfigurator() {
       const data = await apiFetch(`/api/configs/${id}`);
       const p = data.config.payload;
       setDesignStrings(p.strings);
+      // manualStrings (nieuw formaat) heeft voorrang; anders, indien
+      // aanwezig, het oude manualAssign-formaat (indices per MPPT) omzetten
+      // tegen de eveneens geladen strings-lijst.
+      const manualStrings =
+        p.manualStrings ?? manualAssignToManualStrings(p.fleet ? p.manualAssign : p.manualAssign ? [p.manualAssign] : null, p.strings);
+      setDesignManualStrings(manualStrings);
       if (p.fleet) {
         setDesignFleet(p.fleet);
-        setDesignManualAssign(p.manualAssign || null);
       } else {
         // Oud formaat: precies één omvormer, geen vloot — normaliseren bij
         // het laden, geen DB-migratie nodig.
         setDesignFleet([{ inverterId: p.inverterId, count: 1 }]);
-        setDesignManualAssign(p.manualAssign ? [p.manualAssign] : null);
       }
       setDesignAssignMode(p.assignMode || "auto");
       setTMinCold(p.tMinCold);
@@ -609,45 +665,71 @@ export default function PVConfigurator() {
 
   function updateDesignString(idx, field, value) {
     setDesignStrings((prev) => prev.map((s, i) => (i === idx ? { ...s, [field]: value } : s)));
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
   }
   function addDesignString() {
     setDesignStrings((prev) => [...prev, { n: 19, panelId: availPanels[0].id, azimuth: 180, helling: 35 }]);
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
   }
   function removeDesignString(idx) {
     setDesignStrings((prev) => prev.filter((_, i) => i !== idx));
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
   }
-  function assignToMppt(stringIdx, unitIdx, mpptIdx) {
-    setDesignAssignMode("manual");
-    setDesignManualAssign((prev) => {
-      const base = prev
-        ? prev.map((u) => u.map((arr) => [...arr]))
-        : designUnits.map((u) => Array.from({ length: u.inverter.nMppt }, () => []));
-      // verwijder string overal, op elke eenheid
-      for (const unitArr of base) {
-        for (const arr of unitArr) {
-          const p = arr.indexOf(stringIdx);
-          if (p !== -1) arr.splice(p, 1);
-        }
+  // Echt-handmatige MPPT-invoer: elke slot draagt zijn eigen paneeltype +
+  // aantal (+ oriëntatie/helling), rechtstreeks te bewerken — geen
+  // aan/uit-vinklijst van vooraf gedefinieerde strings meer.
+  function manualSlotValue(unitIdx, mpptIdx, slotIdx) {
+    return designManualStrings.find((s) => s.unitIdx === unitIdx && s.mpptIdx === mpptIdx && s.slotIdx === slotIdx) || null;
+  }
+
+  function updateManualSlot(unitIdx, mpptIdx, slotIdx, patch) {
+    setDesignManualStrings((prev) => {
+      const idx = prev.findIndex((s) => s.unitIdx === unitIdx && s.mpptIdx === mpptIdx && s.slotIdx === slotIdx);
+      if (idx === -1) {
+        const base = { unitIdx, mpptIdx, slotIdx, panelId: availPanels[0]?.id, n: 0, azimuth: 180, helling: 35 };
+        return [...prev, { ...base, ...patch }];
       }
-      if (unitIdx >= 0 && mpptIdx >= 0) base[unitIdx][mpptIdx].push(stringIdx);
-      return base;
+      const next = [...prev];
+      next[idx] = { ...next[idx], ...patch };
+      return next;
     });
+  }
+
+  function clearManualSlot(unitIdx, mpptIdx, slotIdx) {
+    setDesignManualStrings((prev) => prev.filter((s) => !(s.unitIdx === unitIdx && s.mpptIdx === mpptIdx && s.slotIdx === slotIdx)));
+  }
+
+  // Overstappen naar Handmatig start vanaf de huidige automatische
+  // toewijzing (i.p.v. leeg) — de gebruiker hoeft dan alleen de specifieke
+  // slots aan te passen die niet kloppen, niet alles opnieuw in te voeren.
+  function enterManualMode() {
+    if (designManualStrings.length === 0 && designStringsResolved.length > 0) {
+      const seeded = [];
+      designUnits.forEach((u, uIdx) => {
+        const unitMppts = designFleetAssignment.units[uIdx] || [];
+        unitMppts.forEach((idxs, mIdx) => {
+          idxs.forEach((gi, slotIdx) => {
+            const s = designStringsResolved[gi];
+            if (s) seeded.push({ unitIdx: uIdx, mpptIdx: mIdx, slotIdx, panelId: s.panelId, n: s.n, azimuth: s.azimuth, helling: s.helling });
+          });
+        });
+      });
+      setDesignManualStrings(seeded);
+    }
+    setDesignAssignMode("manual");
   }
 
   function addFleetRow() {
     setDesignFleet((prev) => [...prev, { inverterId: availInverters[0].id, count: 1 }]);
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
   }
   function updateFleetRow(idx, field, value) {
     setDesignFleet((prev) => prev.map((r, i) => (i === idx ? { ...r, [field]: value } : r)));
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
   }
   function removeFleetRow(idx) {
     setDesignFleet((prev) => prev.filter((_, i) => i !== idx));
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
   }
 
   function updateRoofFace(idx, field, value) {
@@ -704,10 +786,20 @@ export default function PVConfigurator() {
   }
 
   function applyRoofSuggestion(match) {
-    const strings = buildStringsFromRoofFaces(roofFaces, match.nPerString).map((s) => ({ ...s, panelId: roofPanelId }));
+    const cap = minMpptCapacity(match.inverter);
+    const totalSlots = totalMpptSlots(match.inverter) * match.invCount;
+    const groupsWithMax = roofFaces.map((f) => ({ count: +f.count || 0, azimuth: f.azimuth, helling: f.helling, maxPerString: match.nPerString }));
+    const allocation = distributeSlotsEvenly(groupsWithMax, totalSlots);
+    if (!allocation) {
+      setRoofImportError(`Te veel panelen voor de beschikbare MPPT-capaciteit van ${match.inverter.id} (×${match.invCount}) — voorstel niet toegepast.`);
+      return;
+    }
+    const strings = allocation.flatMap((g) =>
+      splitIntoEqualMpptStrings(g.count, cap, g.maxPerString, g.slots).map((n) => ({ n, panelId: roofPanelId, azimuth: g.azimuth, helling: g.helling }))
+    );
     setDesignStrings(strings);
     setDesignFleet([{ inverterId: match.inverter.id, count: match.invCount }]);
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
     setDesignAssignMode("auto");
     setRoofMatches(null);
   }
@@ -719,25 +811,21 @@ export default function PVConfigurator() {
   // string alsnog kan aanpassen of de nieuwe roofFaces-synchronisatie kan
   // gebruiken.
   function sendMatchToDesign(match) {
-    const strings = buildStringsFromRoofFaces([{ count: totalPanels, azimuth: 180, helling: 35 }], match.nPerString).map((s) => ({
-      ...s,
-      panelId: findPanel.id,
-    }));
+    const cap = minMpptCapacity(match.inverter);
+    const totalSlots = totalMpptSlots(match.inverter) * match.invCount;
+    const group = { count: totalPanels, azimuth: 180, helling: 35, maxPerString: match.nPerString };
+    const allocation = distributeSlotsEvenly([group], totalSlots) || [{ ...group, slots: Math.max(1, Math.ceil(totalPanels / match.nPerString)) }];
+    const strings = allocation.flatMap((g) =>
+      splitIntoEqualMpptStrings(g.count, cap, g.maxPerString, g.slots).map((n) => ({ n, azimuth: g.azimuth, helling: g.helling, panelId: findPanel.id }))
+    );
     setDesignStrings(strings);
     setDesignFleet([{ inverterId: match.inverter.id, count: match.invCount }]);
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
     setDesignAssignMode("auto");
     setMode("design");
     setDesignStep("indeling");
   }
 
-  // Herindelen: neemt de al ingevoerde strings (bijv. uit een Sollit-
-  // screenshot in stap 1), telt per paneeltype + oriëntatie/helling het
-  // aantal panelen op tot "dakvlakken", en herbouwt de strings met de
-  // stringlengte die het beste bij de gekozen omvormer past — i.p.v. de
-  // lengte die Sollit toevallig aanhield. Hergebruikt dezelfde
-  // findMatchingInverters/buildStringsFromRoofFaces als het dakvlak-voorstel,
-  // nu met de omvormer als gegeven i.p.v. als zoekresultaat.
   // Herindeelt de huidige panelen (per dakvlak/oriëntatie) over de gekozen
   // omvormer, met de panelen zo gelijk mogelijk verdeeld over ALLE
   // beschikbare MPPT/string-slots (i.p.v. het minimum aantal strings te
@@ -789,7 +877,7 @@ export default function PVConfigurator() {
     );
 
     setDesignStrings(newStrings);
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
     setDesignAssignMode("auto");
   }
 
@@ -844,8 +932,17 @@ export default function PVConfigurator() {
   }
   function applyAgentAssignment(mppts) {
     // De agent kent alleen het 1-eenheid-geval (zie sendChatMessage) — de
-    // voorgestelde mppts zijn dus altijd voor designUnits[0].
-    setDesignManualAssign([mppts]);
+    // voorgestelde mppts zijn dus altijd voor designUnits[0]. mppts bevat
+    // indices in designStrings/designStringsResolved; omzetten naar het
+    // zelfstandige handmatige slot-formaat.
+    const manualStrings = [];
+    mppts.forEach((stringIdxs, mIdx) => {
+      stringIdxs.forEach((si, slotIdx) => {
+        const s = designStringsResolved[si];
+        if (s) manualStrings.push({ unitIdx: 0, mpptIdx: mIdx, slotIdx, panelId: s.panelId, n: s.n, azimuth: s.azimuth, helling: s.helling });
+      });
+    });
+    setDesignManualStrings(manualStrings);
     setDesignAssignMode("manual");
     setMode("design");
     setDesignStep("resultaat");
@@ -892,6 +989,11 @@ export default function PVConfigurator() {
       const data = await apiFetch("/api/datasheets");
       setDatasheetsList(data.datasheets);
     } catch {
+      // stil falen — dit is een achtergrondrefresh, de lijst behoudt gewoon zijn vorige waarde
+    } finally {
+      // Moet ook ná succes weer vrijgegeven worden, anders blokkeert de guard
+      // permanent elke latere refresh (bijv. bij terugkeren naar "Componenten
+      // beheren" om een ondertussen door een collega geüploade datasheet te zien).
       datasheetsFetchStarted.current = false;
     }
   }
@@ -1099,6 +1201,11 @@ export default function PVConfigurator() {
         vsysMax: addType === "panel" ? data.vsysMax ?? "" : "",
         note: "",
         rows,
+        // Bewaard om het brondocument na "Geselecteerde toevoegen" alsnog op
+        // te slaan via /api/datasheets — anders verdwijnt het geüploade
+        // bestand na de extractie spoorloos en is het nooit terug te vinden
+        // in "Componenten beheren" (zie CLAUDE.md: datasheet-traceability).
+        sourceFile: { filename: file.name, mimeType: mediaType, fileBase64: base64 },
       });
     } catch (e) {
       setDatasheetError(e.message);
@@ -1201,9 +1308,30 @@ export default function PVConfigurator() {
         return;
       }
     }
+    // Brondocument alsnog opslaan voor traceerbaarheid (zie CLAUDE.md) — dit
+    // mag de al gelukte component-toevoeging niet ongedaan maken bij falen,
+    // dus alleen een aparte waarschuwing in de statusmelding.
+    let datasheetSaveError = null;
+    if (added > 0 && draft.sourceFile) {
+      try {
+        await apiFetch("/api/datasheets", {
+          method: "POST",
+          body: JSON.stringify({
+            type: addType,
+            familyName: draft.familyName.trim(),
+            filename: draft.sourceFile.filename,
+            mimeType: draft.sourceFile.mimeType,
+            fileBase64: draft.sourceFile.fileBase64,
+          }),
+        });
+        fetchDatasheetsList();
+      } catch (e) {
+        datasheetSaveError = e.message;
+      }
+    }
     setAddStatus({
       type: "ok",
-      message: `${added} variant(en) toegevoegd uit datasheet — nog niet gecontroleerd.${skipped ? ` ${skipped} overgeslagen wegens onvolledige gegevens.` : ""}`,
+      message: `${added} variant(en) toegevoegd uit datasheet — nog niet gecontroleerd.${skipped ? ` ${skipped} overgeslagen wegens onvolledige gegevens.` : ""}${datasheetSaveError ? ` Let op: brondocument opslaan voor "Componenten beheren" is mislukt (${datasheetSaveError}).` : ""}`,
     });
     setDatasheetDraft(null);
     setDatasheetError(null);
@@ -1254,7 +1382,7 @@ export default function PVConfigurator() {
   function applyImportDraft() {
     if (!importDraft) return;
     setDesignStrings(importDraft.rows.map((r) => ({ n: r.n, panelId: r.panelId, azimuth: r.azimuth, helling: r.helling })));
-    setDesignManualAssign(null);
+    setDesignManualStrings([]);
     setDesignAssignMode("auto");
     setImportDraft(null);
     setImportError(null);
@@ -1830,10 +1958,25 @@ export default function PVConfigurator() {
                 <div style={card}>
                   <div style={label}>Toewijzing strings → MPPT</div>
                   <div style={{ display: "flex", gap: 8 }}>
-                    <button onClick={() => { setDesignAssignMode("auto"); setDesignManualAssign(null); }} style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: designAssignMode === "auto" ? "var(--color-background-info)" : "transparent", color: designAssignMode === "auto" ? "var(--color-text-info)" : "var(--color-text-primary)" }}>Automatisch</button>
-                    <button onClick={() => setDesignAssignMode("manual")} style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: designAssignMode === "manual" ? "var(--color-background-info)" : "transparent", color: designAssignMode === "manual" ? "var(--color-text-info)" : "var(--color-text-primary)" }}>Handmatig</button>
+                    <button onClick={() => setDesignAssignMode("auto")} style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: designAssignMode === "auto" ? "var(--color-background-info)" : "transparent", color: designAssignMode === "auto" ? "var(--color-text-info)" : "var(--color-text-primary)" }}>Automatisch</button>
+                    <button onClick={enterManualMode} style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: designAssignMode === "manual" ? "var(--color-background-info)" : "transparent", color: designAssignMode === "manual" ? "var(--color-text-info)" : "var(--color-text-primary)" }}>Handmatig</button>
                   </div>
-                  <div style={{ fontSize: 12, ...muted, marginTop: 6 }}>Automatisch houdt zelfde oriëntatie op zelfde MPPT en vult eenheden op volgorde. Bij een mix van typen: gebruik Handmatig om specifieke strings naar een specifiek omvormertype te sturen.</div>
+                  <div style={{ fontSize: 12, ...muted, marginTop: 6 }}>Automatisch houdt zelfde oriëntatie op zelfde MPPT en vult eenheden op volgorde. Bij een mix van typen: gebruik Handmatig om per MPPT-slot zelf paneeltype en aantal in te vullen.</div>
+                  {designAssignMode === "auto" && (
+                    <div style={{ display: "flex", gap: 16, marginTop: 10, paddingTop: 10, borderTop: "0.5px solid var(--color-border-tertiary)" }}>
+                      <div>
+                        <div style={label}>Max azimuthverschil (°)</div>
+                        <input type="number" min={0} max={180} value={azimuthTolerance} onChange={(e) => setAzimuthTolerance(e.target.value === "" ? "" : Number(e.target.value))} style={{ width: 70 }} />
+                      </div>
+                      <div>
+                        <div style={label}>Max hellingverschil (°)</div>
+                        <input type="number" min={0} max={90} value={tiltTolerance} onChange={(e) => setTiltTolerance(e.target.value === "" ? "" : Number(e.target.value))} style={{ width: 70 }} />
+                      </div>
+                    </div>
+                  )}
+                  <div style={{ fontSize: 11, ...muted, marginTop: 6 }}>
+                    Strings binnen deze marges mogen samen op één MPPT — bijv. twee dakvlakken die allebei vrijwel zuid zijn. Paneeltype en aantal panelen moeten altijd exact gelijk zijn, ongeacht deze marges.
+                  </div>
                 </div>
               </div>
 
@@ -1844,36 +1987,79 @@ export default function PVConfigurator() {
                       Omvormer {unit.unitNumber} <span style={{ ...muted, fontWeight: 400 }}>· {unit.inverterId}</span>
                     </div>
                     <div style={{ display: "grid", gap: 12 }}>
-                      {(designFleetAssignment.units[uIdx] || []).map((stringIdxs, mIdx) => (
-                        <div key={mIdx} style={{ ...card, padding: "16px 20px" }}>
-                          <div style={{ fontWeight: 500, marginBottom: 10 }}>MPPT {mIdx + 1}</div>
-                          {stringIdxs.length === 0 ? (
-                            <div style={{ fontSize: 13, ...muted }}>Leeg</div>
-                          ) : (
-                            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                              {stringIdxs.map((si) => {
-                                const s = designStringsResolved[si];
-                                return (
-                                  <div key={si} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
-                                    <span style={{ color: "var(--color-text-secondary)" }}>String {si + 1} · {s.n} panelen</span>
-                                    <span style={{ color: "var(--color-text-tertiary)" }}>{s.azimuth}° · {s.helling}°</span>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          )}
-                          {designAssignMode === "manual" && (
-                            <div style={{ marginTop: 10, paddingTop: 10, borderTop: "0.5px solid var(--color-border-tertiary)", fontSize: 12, display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center" }}>
-                              <span style={muted}>Wijs string toe:</span>
-                              {designStringsResolved.map((s, si) => (
-                                <button key={si} onClick={() => assignToMppt(si, uIdx, mIdx)} style={{ fontSize: 11, padding: "2px 8px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", background: stringIdxs.includes(si) ? "var(--color-background-info)" : "transparent", color: stringIdxs.includes(si) ? "var(--color-text-info)" : "var(--color-text-primary)", cursor: "pointer" }}>
-                                  S{si + 1} ({s.n}@{s.azimuth}°)
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      ))}
+                      {(designFleetAssignment.units[uIdx] || []).map((stringIdxs, mIdx) => {
+                        const cap = mpptCapacity(unit.inverter, mIdx);
+                        return (
+                          <div key={mIdx} style={{ ...card, padding: "16px 20px" }}>
+                            <div style={{ fontWeight: 500, marginBottom: 10 }}>MPPT {mIdx + 1}</div>
+                            {designAssignMode === "auto" ? (
+                              stringIdxs.length === 0 ? (
+                                <div style={{ fontSize: 13, ...muted }}>Leeg</div>
+                              ) : (
+                                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                  {stringIdxs.map((si) => {
+                                    const s = activeStringsResolved[si];
+                                    return (
+                                      <div key={si} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                                        <span style={{ color: "var(--color-text-secondary)" }}>String {si + 1} · {s.n} panelen</span>
+                                        <span style={{ color: "var(--color-text-tertiary)" }}>{s.azimuth}° · {s.helling}°</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              )
+                            ) : (
+                              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                                {Array.from({ length: cap }, (_, slotIdx) => {
+                                  const slot = manualSlotValue(uIdx, mIdx, slotIdx);
+                                  return (
+                                    <div key={slotIdx} style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                                      <span style={{ fontSize: 12, ...muted, width: 14 }}>{slotIdx + 1}.</span>
+                                      <select
+                                        value={slot?.panelId || ""}
+                                        onChange={(e) => updateManualSlot(uIdx, mIdx, slotIdx, { panelId: e.target.value })}
+                                        style={{ flex: "1 1 160px", minWidth: 120, fontSize: 12 }}
+                                      >
+                                        <option value="">— paneeltype —</option>
+                                        {availPanels.map((p) => (
+                                          <option key={p.id} value={p.id}>{p.id} — {p.wp}Wp</option>
+                                        ))}
+                                      </select>
+                                      <input
+                                        type="number"
+                                        min={0}
+                                        placeholder="aantal"
+                                        value={slot?.n || ""}
+                                        onChange={(e) => updateManualSlot(uIdx, mIdx, slotIdx, { n: Number(e.target.value) || 0 })}
+                                        style={{ width: 70, fontSize: 12 }}
+                                      />
+                                      <span style={{ fontSize: 11, ...muted }}>Az</span>
+                                      <input
+                                        type="number"
+                                        value={slot?.azimuth ?? 180}
+                                        onChange={(e) => updateManualSlot(uIdx, mIdx, slotIdx, { azimuth: Number(e.target.value) })}
+                                        style={{ width: 55, fontSize: 12 }}
+                                      />
+                                      <span style={{ fontSize: 11, ...muted }}>Hel</span>
+                                      <input
+                                        type="number"
+                                        value={slot?.helling ?? 35}
+                                        onChange={(e) => updateManualSlot(uIdx, mIdx, slotIdx, { helling: Number(e.target.value) })}
+                                        style={{ width: 55, fontSize: 12 }}
+                                      />
+                                      {slot && (
+                                        <button onClick={() => clearManualSlot(uIdx, mIdx, slotIdx)} title="Slot leegmaken" style={{ border: "none", background: "transparent", cursor: "pointer", color: "var(--color-text-tertiary)", padding: 2 }}>
+                                          <i className="ti ti-x" style={{ fontSize: 14 }} />
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 ))}
