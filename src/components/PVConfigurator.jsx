@@ -238,7 +238,7 @@ export default function PVConfigurator() {
 
   const [panelDb, setPanelDb] = useState(() => getPanelFamilies());
   const [inverterDb, setInverterDb] = useState(() => getInverterFamilies());
-  const [mode, setMode] = useState("design"); // "design" | "find" | "library" | "agent"
+  const [mode, setMode] = useState("design"); // "design" | "kabel" | "library" | "agent"
 
   const [tMinCold, setTMinCold] = useState(-10);
   const [tMaxHot, setTMaxHot] = useState(70);
@@ -313,11 +313,6 @@ export default function PVConfigurator() {
   const [saveSollitId, setSaveSollitId] = useState("");
   const [saveStatus, setSaveStatus] = useState(null); // { type: "ok" | "error", message }
 
-  // Omvormer zoeken
-  const [findPanelId, setFindPanelId] = useState("JAM54D41-430/GB");
-  const [totalPanels, setTotalPanels] = useState(76);
-  const [fixedInvCount, setFixedInvCount] = useState(""); // "" = automatisch optimaliseren
-
   // Vrije vraag/antwoord-agent (tabblad "Agent"): elk antwoord komt tot stand
   // via tool-aanroepen naar de rekenkern, nooit door de agent zelf te laten
   // rekenen. chatMessages: [{ role: "user"|"assistant", content, toolCalls? }]
@@ -367,13 +362,6 @@ export default function PVConfigurator() {
     () => baseInverters.map((v) => ({ ...v, fitsConn: inverterFitsConnection(v.iacMax, conn.amps) })),
     [baseInverters, conn]
   );
-
-  const findPanel = availPanels.find((p) => p.id === findPanelId) || availPanels[0];
-  const matches = useMemo(() => {
-    if (mode !== "find" || !findPanel) return [];
-    const count = fixedInvCount ? Math.max(1, +fixedInvCount) : undefined;
-    return findMatchingInverters({ panel: findPanel, totalPanels, tMinCold, tMaxHot, inverters: availInverters, fixedInvCount: count });
-  }, [mode, findPanel, totalPanels, tMinCold, tMaxHot, availInverters, fixedInvCount]);
 
   // Ontwerp checken: koppel paneeldata aan elke string
   const designStringsResolved = useMemo(
@@ -507,15 +495,21 @@ export default function PVConfigurator() {
     return requiredCableCrossSection({ current: totalIacMax, length: cableLength, phases: conn.phases, installMethod: cableInstallMethod });
   }, [totalIacMax, cableLength, cableInstallMethod, conn.phases]);
 
-  // Losse "AC-kabel"-tab: stroom komt of uit een handmatig ingevoerde
-  // waarde, of uit een gekozen omvormer (iacMax × aantal) uit de database.
+  // Losse "AC-kabel"-tab: stroom komt uit het huidige ontwerp (indien
+  // aanwezig), een handmatig ingevoerde waarde, of een gekozen omvormer
+  // (iacMax × aantal) uit de database.
   const kabelSelectedInverter = availInverters.find((i) => i.id === kabelInverterId) || availInverters[0];
   const kabelCurrentA =
-    kabelInputMode === "manual" ? Number(kabelManualCurrent) || 0 : (kabelSelectedInverter?.iacMax || 0) * (Number(kabelInverterCount) || 0);
+    kabelInputMode === "design"
+      ? totalIacMax
+      : kabelInputMode === "manual"
+      ? Number(kabelManualCurrent) || 0
+      : (kabelSelectedInverter?.iacMax || 0) * (Number(kabelInverterCount) || 0);
+  const kabelPhasesEffective = kabelInputMode === "design" ? conn.phases : kabelPhases;
   const kabelResult = useMemo(() => {
     if (kabelCurrentA <= 0 || !kabelLength) return null;
-    return requiredCableCrossSection({ current: kabelCurrentA, length: kabelLength, phases: kabelPhases, installMethod: kabelInstallMethod });
-  }, [kabelCurrentA, kabelLength, kabelInstallMethod, kabelPhases]);
+    return requiredCableCrossSection({ current: kabelCurrentA, length: kabelLength, phases: kabelPhasesEffective, installMethod: kabelInstallMethod });
+  }, [kabelCurrentA, kabelLength, kabelInstallMethod, kabelPhasesEffective]);
 
   // Rapport voor de monteur: label = omvormer.mppt.string, omvormer-cijfer =
   // het doorlopende eenheidsnummer uit designUnits, + Voc STC per string.
@@ -802,27 +796,6 @@ export default function PVConfigurator() {
     setDesignManualStrings([]);
     setDesignAssignMode("auto");
     setRoofMatches(null);
-  }
-
-  // "Omvormer zoeken" kent geen oriëntatie/helling per string (alleen een
-  // totaal aantal panelen) — bouwt daarom één dakvlak met de standaard
-  // aanname (180°/35°, zelfde default als een nieuwe handmatige string),
-  // door te sturen naar Indeling waar de gebruiker azimuth/helling per
-  // string alsnog kan aanpassen of de nieuwe roofFaces-synchronisatie kan
-  // gebruiken.
-  function sendMatchToDesign(match) {
-    const cap = minMpptCapacity(match.inverter);
-    const totalSlots = totalMpptSlots(match.inverter) * match.invCount;
-    const group = { count: totalPanels, azimuth: 180, helling: 35, maxPerString: match.nPerString };
-    const allocation = distributeSlotsEvenly([group], totalSlots) || [{ ...group, slots: Math.max(1, Math.ceil(totalPanels / match.nPerString)) }];
-    const strings = allocation.flatMap((g) =>
-      splitIntoEqualMpptStrings(g.count, cap, g.maxPerString, g.slots).map((n) => ({ n, azimuth: g.azimuth, helling: g.helling, panelId: findPanel.id }))
-    );
-    setDesignStrings(strings);
-    setDesignFleet([{ inverterId: match.inverter.id, count: match.invCount }]);
-    setDesignManualStrings([]);
-    setDesignAssignMode("auto");
-    setMode("design");
     setDesignStep("indeling");
   }
 
@@ -1625,7 +1598,6 @@ export default function PVConfigurator() {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginBottom: 28, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {tabBtn("design", "Ontwerp checken")}
-          {tabBtn("find", "Omvormer zoeken")}
           {tabBtn("kabel", "AC-kabel")}
           {tabBtn("library", "Componenten beheren")}
           {tabBtn("agent", "Agent")}
@@ -1715,68 +1687,11 @@ export default function PVConfigurator() {
                 )}
               </div>
 
-              {renderStringplanImport()}
-
-              <h3 style={{ fontSize: 16, fontWeight: 500, margin: "0 0 12px" }}>Of voer strings handmatig in</h3>
-              <div style={{ display: "grid", gap: 10, marginBottom: 16 }}>
-                {designStringsResolved.map((s, i) => {
-                  const azColors = ["#378ADD", "#D85A30", "#1D9E75", "#BA7517", "#534AB7", "#D4537E"];
-                  const azList = [...new Set(designStrings.map((x) => x.azimuth))];
-                  const col = azColors[azList.indexOf(s.azimuth) % azColors.length];
-                  return (
-                    <div key={i} style={{ ...card, padding: "12px 16px", borderLeft: `3px solid ${col}`, borderRadius: "var(--border-radius-md)", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                        <input type="number" min={1} max={40} value={s.n} onChange={(e) => updateDesignString(i, "n", +e.target.value)} style={{ width: 56 }} />
-                        <span style={{ fontSize: 13, ...muted }}>×</span>
-                      </div>
-                      <select value={s.panelId} onChange={(e) => updateDesignString(i, "panelId", e.target.value)} style={{ flex: "1 1 180px", minWidth: 140 }}>
-                        {availPanels.map((p) => (
-                          <option key={p.id} value={p.id}>{p.id} — {p.wp}Wp{p.label ? ` · ${p.label}` : ""}</option>
-                        ))}
-                      </select>
-                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <span style={{ fontSize: 12, ...muted }}>Az</span>
-                        <input type="number" min={0} max={359} value={s.azimuth} onChange={(e) => updateDesignString(i, "azimuth", +e.target.value)} style={{ width: 60 }} />°
-                      </div>
-                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                        <span style={{ fontSize: 12, ...muted }}>Hel</span>
-                        <input type="number" min={0} max={90} value={s.helling} onChange={(e) => updateDesignString(i, "helling", +e.target.value)} style={{ width: 50 }} />°
-                      </div>
-                      <button onClick={() => removeDesignString(i)} aria-label="verwijder string" style={{ padding: "4px 8px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-danger)" }}>
-                        <i className="ti ti-trash" style={{ fontSize: 15 }} />
-                      </button>
-                    </div>
-                  );
-                })}
+              <h3 style={{ fontSize: 16, fontWeight: 500, margin: "0 0 4px" }}>Dakvlakken</h3>
+              <div style={{ fontSize: 13, ...muted, marginBottom: 14 }}>
+                Voer per dakvlak het aantal panelen, de azimuth en de helling in (nog geen strings nodig) — ik stel een stringverdeling en een passende omvormer voor.
               </div>
-              <button onClick={addDesignString} style={{ fontSize: 13, padding: "6px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-primary)", marginBottom: 28 }}>
-                <i className="ti ti-plus" style={{ fontSize: 15, verticalAlign: -2, marginRight: 4 }} /> String toevoegen
-              </button>
-
-              <div style={{ display: "flex", justifyContent: "flex-end" }}>
-                <button
-                  onClick={() => setDesignStep("indeling")}
-                  style={{ padding: "8px 18px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500 }}
-                >
-                  Volgende: indeling
-                </button>
-              </div>
-              {designStrings.length === 0 && (
-                <div style={{ fontSize: 12, ...muted, marginTop: 8, textAlign: "right" }}>
-                  Nog geen strings? In Indeling kun je ook een dakvlak-voorstel laten genereren.
-                </div>
-              )}
-            </>
-          )}
-
-          {/* STAP 2: INDELING */}
-          {designStep === "indeling" && designUnits.length > 0 && (
-            <>
-              <div style={{ ...card, marginBottom: 20, background: "var(--color-background-secondary)", border: "none" }}>
-                <div style={{ fontWeight: 500, marginBottom: 4 }}>Nog geen stringverdeling? Laat een voorstel doen.</div>
-                <div style={{ fontSize: 12, ...muted, marginBottom: 14 }}>
-                  Voer de dakvlakken in (aantal panelen + azimuth + helling, nog geen strings) — ik stel een stringverdeling en een passende omvormer voor.
-                </div>
+              <div style={{ ...card, marginBottom: 28, background: "var(--color-background-secondary)", border: "none" }}>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, marginBottom: 14 }}>
                   <div>
                     <div style={label}>Paneeltype</div>
@@ -1890,6 +1805,62 @@ export default function PVConfigurator() {
                 )}
               </div>
 
+              <h3 style={{ fontSize: 16, fontWeight: 500, margin: "0 0 4px" }}>Heb je al een exacte stringindeling?</h3>
+              <div style={{ fontSize: 13, ...muted, marginBottom: 14 }}>
+                Bijvoorbeeld uit een Sollit-legplan. Upload een screenshot, of vul de strings direct in.
+              </div>
+
+              {renderStringplanImport()}
+
+              <div style={{ display: "grid", gap: 10, marginBottom: 16 }}>
+                {designStringsResolved.map((s, i) => {
+                  const azColors = ["#378ADD", "#D85A30", "#1D9E75", "#BA7517", "#534AB7", "#D4537E"];
+                  const azList = [...new Set(designStrings.map((x) => x.azimuth))];
+                  const col = azColors[azList.indexOf(s.azimuth) % azColors.length];
+                  return (
+                    <div key={i} style={{ ...card, padding: "12px 16px", borderLeft: `3px solid ${col}`, borderRadius: "var(--border-radius-md)", display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                        <input type="number" min={1} max={40} value={s.n} onChange={(e) => updateDesignString(i, "n", +e.target.value)} style={{ width: 56 }} />
+                        <span style={{ fontSize: 13, ...muted }}>×</span>
+                      </div>
+                      <select value={s.panelId} onChange={(e) => updateDesignString(i, "panelId", e.target.value)} style={{ flex: "1 1 180px", minWidth: 140 }}>
+                        {availPanels.map((p) => (
+                          <option key={p.id} value={p.id}>{p.id} — {p.wp}Wp{p.label ? ` · ${p.label}` : ""}</option>
+                        ))}
+                      </select>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ fontSize: 12, ...muted }}>Az</span>
+                        <input type="number" min={0} max={359} value={s.azimuth} onChange={(e) => updateDesignString(i, "azimuth", +e.target.value)} style={{ width: 60 }} />°
+                      </div>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <span style={{ fontSize: 12, ...muted }}>Hel</span>
+                        <input type="number" min={0} max={90} value={s.helling} onChange={(e) => updateDesignString(i, "helling", +e.target.value)} style={{ width: 50 }} />°
+                      </div>
+                      <button onClick={() => removeDesignString(i)} aria-label="verwijder string" style={{ padding: "4px 8px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-danger)" }}>
+                        <i className="ti ti-trash" style={{ fontSize: 15 }} />
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+              <button onClick={addDesignString} style={{ fontSize: 13, padding: "6px 12px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-primary)", marginBottom: 28 }}>
+                <i className="ti ti-plus" style={{ fontSize: 15, verticalAlign: -2, marginRight: 4 }} /> String toevoegen
+              </button>
+
+              <div style={{ display: "flex", justifyContent: "flex-end" }}>
+                <button
+                  onClick={() => setDesignStep("indeling")}
+                  style={{ padding: "8px 18px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500 }}
+                >
+                  Volgende: indeling
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* STAP 2: INDELING */}
+          {designStep === "indeling" && designUnits.length > 0 && (
+            <>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 16, marginBottom: 28 }}>
                 <div style={card}>
                   <div style={label}>Omvormerpark</div>
@@ -2315,99 +2286,18 @@ export default function PVConfigurator() {
         </>
       )}
 
-      {/* OMVORMER ZOEKEN */}
-      {mode === "find" && findPanel && (
-        <>
-          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16, marginBottom: 24 }}>
-            <div style={card}>
-              <div style={label}>Paneel</div>
-              <select value={findPanelId} onChange={(e) => setFindPanelId(e.target.value)} style={{ width: "100%" }}>
-                {availPanels.map((p) => (
-                  <option key={p.id} value={p.id}>{p.id} — {p.wp} Wp{p.label ? ` · ${p.label}` : ""}</option>
-                ))}
-              </select>
-            </div>
-            <div style={card}>
-              <div style={label}>Aantal panelen</div>
-              <input type="number" min={1} step={1} value={totalPanels} onChange={(e) => setTotalPanels(Math.max(1, +e.target.value || 0))} style={{ width: 120 }} />
-              <div style={{ fontSize: 12, ...muted, marginTop: 4 }}>{(totalPanels * findPanel.wp / 1000).toFixed(2)} kWp totaal</div>
-            </div>
-            <div style={card}>
-              <div style={label}>Aantal omvormers (optioneel)</div>
-              <input
-                type="number"
-                min={1}
-                step={1}
-                value={fixedInvCount}
-                onChange={(e) => setFixedInvCount(e.target.value)}
-                placeholder="automatisch"
-                style={{ width: 120 }}
-              />
-              <div style={{ fontSize: 12, ...muted, marginTop: 4 }}>
-                Bijv. omdat het pand een vast aantal aansluitingen heeft — leeg laten optimaliseert naar het minimum aantal.
-              </div>
-            </div>
-          </div>
-
-          {matches.length === 0 ? (
-            <div style={{ ...card, ...muted }}>
-              Geen enkele beschikbare omvormer past {totalPanels}× {findPanel.id}{fixedInvCount ? ` op precies ${fixedInvCount} omvormer(s)` : ""} binnen de grenzen bij {tMinCold}°C. Probeer minder panelen, een ander aantal omvormers, een hogere ontwerptemperatuur, of zet meer omvormers beschikbaar in "Componenten beheren".
-            </div>
-          ) : (
-            <div style={{ display: "grid", gap: 14 }}>
-              {matches.map((m, i) => (
-                <div key={m.inverter.id} style={{ ...card, border: i === 0 ? "2px solid var(--color-border-info)" : card.border }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", flexWrap: "wrap", gap: 8 }}>
-                    <div>
-                      <span style={{ fontWeight: 500, fontSize: 15 }}>{m.invCount > 1 ? `${m.invCount}× ` : ""}{m.inverter.id}</span>
-                      {m.inverter.isGoodwe && <span style={{ background: "var(--color-background-info)", color: "var(--color-text-info)", fontSize: 11, padding: "2px 8px", borderRadius: "var(--border-radius-md)", marginLeft: 8 }}>GoodWe</span>}
-                      <span style={{ fontSize: 12, ...muted, marginLeft: 8 }}>{m.inverter.family}</span>
-                    </div>
-                    {i === 0 && <span style={{ background: "var(--color-background-info)", color: "var(--color-text-info)", fontSize: 12, padding: "3px 10px", borderRadius: "var(--border-radius-md)" }}>Beste match</span>}
-                  </div>
-                  <div style={{ fontSize: 13, marginTop: 10 }}>
-                    {m.stringsTotal} strings × {m.nPerString} panelen
-                    {m.invCount > 1 && <span> · {m.stringsPerInv} strings/omvormer</span>}
-                    {" · max "}{m.stringsPerMpptUsed}/MPPT · {(m.totalWp / 1000).toFixed(1)} kWp op {(m.totalAc / 1000).toFixed(1)} kW AC
-                    {m.invCount > 1 && <span style={{ ...muted }}> ({m.invCount}× {(m.inverter.pacNom / 1000).toFixed(0)} kW)</span>}
-                  </div>
-                  <div style={{ fontSize: 13, marginTop: 6 }}>
-                    <span style={muted}>Overdimensionering: </span>
-                    <b style={{ color: m.highOverdim ? "var(--color-text-warning)" : "var(--color-text-primary)" }}>{(m.dcAcRatio * 100).toFixed(0)}%</b>
-                    <span style={{ fontSize: 12, ...muted }}> · min. afzekering {m.inverter.minFuse} A/omvormer</span>
-                  </div>
-                  {m.highOverdim && (
-                    <div style={{ fontSize: 11, color: "var(--color-text-warning)", marginTop: 6 }}>
-                      Boven 150% — toegestaan binnen de omvormerspecs (DC onder pmax), maar reken op aftopverliezen op piekmomenten; zonder accu beperkt rendabel.
-                    </div>
-                  )}
-                  {!m.inBand && !m.highOverdim && (
-                    <div style={{ fontSize: 11, color: "var(--color-text-secondary)", marginTop: 6 }}>
-                      Onder de gebruikelijke 120–150%-band — bijv. omdat een vast aantal omvormers is opgegeven dat groter is dan het minimum.
-                    </div>
-                  )}
-                  <button
-                    onClick={() => sendMatchToDesign(m)}
-                    style={{ marginTop: 10, padding: "6px 14px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500, fontSize: 12 }}
-                  >
-                    Gebruiken in Ontwerp checken
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-          <div style={{ fontSize: 12, ...muted, marginTop: 16 }}>
-            Verdeling = gelijke strings over alle MPPT's. Bij gemengde oriëntaties of optimizers kan een andere verdeling wenselijk zijn.
-          </div>
-        </>
-      )}
-
-      {/* AC-KABEL (los, niet gekoppeld aan een lopend ontwerp) */}
+      {/* AC-KABEL */}
       {mode === "kabel" && (
         <>
           <div style={{ ...card, marginBottom: 20 }}>
             <div style={{ fontWeight: 500, marginBottom: 12 }}>Ontwerpstroom</div>
             <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+              <button
+                onClick={() => setKabelInputMode("design")}
+                style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: kabelInputMode === "design" ? "var(--color-background-info)" : "transparent", color: kabelInputMode === "design" ? "var(--color-text-info)" : "var(--color-text-primary)" }}
+              >
+                Huidig ontwerp
+              </button>
               <button
                 onClick={() => setKabelInputMode("manual")}
                 style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: kabelInputMode === "manual" ? "var(--color-background-info)" : "transparent", color: kabelInputMode === "manual" ? "var(--color-text-info)" : "var(--color-text-primary)" }}
@@ -2425,7 +2315,11 @@ export default function PVConfigurator() {
                 Omvormer kiezen
               </button>
             </div>
-            {kabelInputMode === "manual" ? (
+            {kabelInputMode === "design" ? (
+              <div style={{ fontSize: 13 }}>
+                {totalIacMax.toFixed(1)} A · {conn.phases}-fase <span style={muted}>(totale omvormer-uitgang uit "Ontwerp checken")</span>
+              </div>
+            ) : kabelInputMode === "manual" ? (
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
                 <div>
                   <div style={label}>Stroom (A)</div>
