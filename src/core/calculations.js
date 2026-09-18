@@ -42,6 +42,14 @@ export function getConnection(id) {
 export const OVERDIM_MIN = 1.2; // 120%
 export const OVERDIM_MAX = 1.5; // 150%
 
+// Standaard toleranties waarbinnen strings van enigszins afwijkende
+// oriëntatie/helling toch samen op één MPPT mogen (bijv. twee dakvlakken die
+// allebei "vrijwel zuid" zijn maar niet exact dezelfde azimuth hebben).
+// Aanpasbaar per ontwerp — dit zijn alleen de defaults (2026-09-18, op
+// verzoek: gemengde MPPT's toestaan binnen instelbare grenzen i.p.v. nooit).
+export const DEFAULT_AZIMUTH_TOLERANCE = 20; // graden
+export const DEFAULT_TILT_TOLERANCE = 10; // graden
+
 // ----------------------------------------------------------------------------
 // Temperatuurcorrectie
 // ----------------------------------------------------------------------------
@@ -385,8 +393,34 @@ export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, i
 // Legplan: lijst strings { n, panel, azimuth, helling }
 // ----------------------------------------------------------------------------
 
+// Kortste hoekverschil tussen twee azimuts, met 360°-wrap: 350° en 10° liggen
+// 20° uit elkaar, niet 340°.
+function azimuthDiff(a, b) {
+  const diff = Math.abs(a - b) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
+// Mogen deze twee strings parallel op dezelfde MPPT staan? Twee eisen zijn
+// hard, nooit instelbaar: zelfde paneeltype en zelfde aantal panelen per
+// string (anders stuurt de zwakste/kortste string de hele parallel-
+// combinatie — een elektrisch ongeldige situatie, geen smaakkwestie).
+// Oriëntatie en helling mogen wél enigszins verschillen, binnen instelbare
+// toleranties (standaard 20°/10°, zie DEFAULT_AZIMUTH_TOLERANCE/
+// DEFAULT_TILT_TOLERANCE) — dat dekt bijv. twee dakvlakken die allebei
+// "vrijwel zuid" zijn maar niet exact dezelfde azimuth hebben.
+export function canShareMppt(a, b, tolerances = {}) {
+  const azimuthTol = tolerances.azimuthTol ?? DEFAULT_AZIMUTH_TOLERANCE;
+  const tiltTol = tolerances.tiltTol ?? DEFAULT_TILT_TOLERANCE;
+  if (a.n !== b.n) return false;
+  if ((a.panelId ?? a.panel?.id) !== (b.panelId ?? b.panel?.id)) return false;
+  if (azimuthDiff(a.azimuth, b.azimuth) > azimuthTol) return false;
+  if (Math.abs((a.helling ?? 0) - (b.helling ?? 0)) > tiltTol) return false;
+  return true;
+}
+
 // Oriëntatie-bewuste toewijzing van strings aan MPPT's van één omvormer.
-export function autoAssign(strings, inverter) {
+// `tolerances` (optioneel): { azimuthTol, tiltTol } — zie canShareMppt.
+export function autoAssign(strings, inverter, tolerances = {}) {
   const mppts = Array.from({ length: inverter.nMppt }, () => []);
   const byAz = {};
   strings.forEach((s, i) => {
@@ -395,16 +429,13 @@ export function autoAssign(strings, inverter) {
   });
   const ordered = Object.values(byAz).sort((a, b) => b.length - a.length).flat();
   for (const si of ordered) {
-    const az = strings[si].azimuth;
-    const n = strings[si].n;
-    // Strings die parallel op dezelfde MPPT komen te staan moeten elektrisch
-    // gelijke lengte hebben (anders stuurt de kortste string de hele
-    // parallelcombinatie) — nooit combineren op basis van oriëntatie alleen.
+    const s = strings[si];
+    // Combineren mag alleen binnen canShareMppt (gelijke lengte/paneeltype,
+    // oriëntatie/helling binnen tolerantie) — geen fallback die dat negeert.
     let target = mppts.findIndex(
-      (m, idx) => m.length < mpptCapacity(inverter, idx) && m.length > 0 && strings[m[0]].azimuth === az && strings[m[0]].n === n
+      (m, idx) => m.length < mpptCapacity(inverter, idx) && m.length > 0 && canShareMppt(strings[m[0]], s, tolerances)
     );
     if (target === -1) target = mppts.findIndex((m) => m.length === 0);
-    if (target === -1) target = mppts.findIndex((m, idx) => m.length < mpptCapacity(inverter, idx) && strings[m[0]].n === n);
     if (target === -1) return { mppts, overflow: true };
     mppts[target].push(si);
   }
@@ -412,11 +443,11 @@ export function autoAssign(strings, inverter) {
 }
 
 // Verdeelt strings over een vloot van (mogelijk verschillende) omvormer-
-// eenheden. Zelfde heuristiek als autoAssign (oriëntatie eerst, dan
-// capaciteit), nu over alle MPPT-slots van de hele vloot heen. Elektrische
-// geschiktheid per type wordt hier niet gecheckt — dat doet checkLegplan,
-// per eenheid, achteraf (net als bij één omvormer).
-export function autoAssignFleet(strings, units) {
+// eenheden. Zelfde heuristiek als autoAssign (oriëntatie/tolerantie eerst,
+// dan capaciteit), nu over alle MPPT-slots van de hele vloot heen.
+// Elektrische geschiktheid per type wordt hier niet gecheckt — dat doet
+// checkLegplan, per eenheid, achteraf (net als bij één omvormer).
+export function autoAssignFleet(strings, units, tolerances = {}) {
   const unitMppts = units.map((u) => Array.from({ length: u.inverter.nMppt }, () => []));
   const slots = [];
   units.forEach((u, uIdx) => {
@@ -433,20 +464,12 @@ export function autoAssignFleet(strings, units) {
   const ordered = Object.values(byAz).sort((a, b) => b.length - a.length).flat();
 
   for (const si of ordered) {
-    const az = strings[si].azimuth;
-    const n = strings[si].n;
-    // Zelfde regel als autoAssign: nooit strings van ongelijke lengte samen
-    // op één MPPT (parallel) zetten, ook niet als fallback zonder oriëntatie-match.
-    let target = slots.find((s) => {
-      const a = arrOf(s);
-      return a.length > 0 && a.length < s.cap && strings[a[0]].azimuth === az && strings[a[0]].n === n;
+    const s = strings[si];
+    let target = slots.find((sl) => {
+      const a = arrOf(sl);
+      return a.length > 0 && a.length < sl.cap && canShareMppt(strings[a[0]], s, tolerances);
     });
-    if (!target) target = slots.find((s) => arrOf(s).length === 0);
-    if (!target)
-      target = slots.find((s) => {
-        const a = arrOf(s);
-        return a.length > 0 && a.length < s.cap && strings[a[0]].n === n;
-      });
+    if (!target) target = slots.find((sl) => arrOf(sl).length === 0);
     if (!target) return { units: unitMppts, overflow: true };
     arrOf(target).push(si);
   }
@@ -511,6 +534,17 @@ export function checkLegplan(strings, inverter, assignment, tMinCold, tMaxHot) {
     checks.push({ key: "isc", label: `Isc (${strs.length}× string)`, value: iscTotal, unit: "A", limit: inverter.isc, pass: iscTotal <= inverter.isc });
 
     checks.push({ key: "strings", label: "Strings", value: strs.length, unit: "", limit: mpptCapacity(inverter, mpptNum), pass: strs.length <= mpptCapacity(inverter, mpptNum) });
+
+    // Alleen relevant bij >1 string op deze MPPT: parallelle strings moeten
+    // altijd gelijk paneeltype en gelijk aantal panelen hebben (hard, zie
+    // canShareMppt) — autoAssign garandeert dit al, maar handmatige invoer
+    // kan dat omzeilen, dus expliciet valideren i.p.v. stilzwijgend een
+    // elektrisch ongeldige combinatie doorrekenen.
+    if (strs.length > 1) {
+      const ref = strs[0];
+      const equal = strs.every((s) => s.n === ref.n && (s.panelId ?? s.panel?.id) === (ref.panelId ?? ref.panel?.id));
+      checks.push({ key: "equalStrings", label: "Gelijke strings op MPPT", value: equal ? "gelijk" : "ongelijk", unit: "", limit: "gelijk", pass: equal });
+    }
 
     return { mpptNum, empty: false, checks, strings: strs, stringIdxs, mixed, pass: allPass(checks) };
   });

@@ -18,6 +18,9 @@ import {
   checkLegplanMulti,
   autoAssign,
   autoAssignFleet,
+  canShareMppt,
+  DEFAULT_AZIMUTH_TOLERANCE,
+  DEFAULT_TILT_TOLERANCE,
   checkLegplan,
   distributeCounts,
   buildStringsFromRoofFaces,
@@ -36,6 +39,9 @@ import {
 
 // Referentiepaneel: JA Solar JAM54D41-430/GB
 const JA430 = { id: "JAM54D41-430/GB", wp: 430, voc: 38.32, vmp: 32.21, isc: 14.23, imp: 13.35, betaVoc: -0.26 };
+// Tweede paneeltype, alleen voor "verschillend moduletype mag nooit samen op
+// één MPPT"-tests — elektrisch verder irrelevant welke waarden dit zijn.
+const LONGI540 = { id: "LR7-60HVH-540M", wp: 540, voc: 49.9, vmp: 41.9, isc: 13.9, imp: 12.9, betaVoc: -0.25 };
 
 // Referentieomvormers
 const T20 = { id: "SMILE-G3-T20", vmax: 1000, vmpptMin: 200, vmpptMax: 850, imppt: 18, isc: 22.5, nMppt: 3, stringsPerMppt: 1, pmax: 40000, pacNom: 20000, iacMax: 32.0, isGoodwe: false };
@@ -283,6 +289,80 @@ test("autoAssignFleet: strings met ongelijke lengte mogen nooit samen op één M
     const lengths = new Set(mppt.map((si) => strings[si].n));
     assert.ok(lengths.size <= 1, `strings op één MPPT moeten gelijke lengte hebben, kreeg ${[...lengths]}`);
   }
+});
+
+// --- Gemengde MPPT's binnen instelbare oriëntatie/helling-tolerantie --------
+// (2026-09-18, op verzoek: mengen mag, binnen grenzen, i.p.v. nooit)
+
+test("canShareMppt: azimuth binnen tolerantie (incl. 360°-wrap) mag delen, erbuiten niet", () => {
+  const a = { n: 19, panelId: "P", azimuth: 350, helling: 20 };
+  assert.equal(canShareMppt(a, { ...a, azimuth: 10 }, { azimuthTol: 20 }), true, "350° en 10° liggen 20° uit elkaar (via de wrap), niet 340°");
+  assert.equal(canShareMppt(a, { ...a, azimuth: 320 }, { azimuthTol: 20 }), false, "30° verschil (350° t.o.v. 320°) is buiten een tolerantie van 20°");
+});
+
+test("canShareMppt: helling binnen tolerantie mag delen, erbuiten niet", () => {
+  const a = { n: 19, panelId: "P", azimuth: 180, helling: 15 };
+  assert.equal(canShareMppt(a, { ...a, helling: 24 }, { tiltTol: 10 }), true);
+  assert.equal(canShareMppt(a, { ...a, helling: 26 }, { tiltTol: 10 }), false);
+});
+
+test("canShareMppt: verschillend paneeltype of aantal panelen mag nooit delen, ongeacht tolerantie", () => {
+  const a = { n: 19, panelId: "A", azimuth: 180, helling: 20 };
+  assert.equal(canShareMppt(a, { ...a, panelId: "B" }, { azimuthTol: 360, tiltTol: 90 }), false, "ander moduletype blijft hard geblokkeerd, ook bij (onrealistisch) ruime tolerantie");
+  assert.equal(canShareMppt(a, { ...a, n: 18 }, { azimuthTol: 360, tiltTol: 90 }), false, "ander aantal panelen blijft hard geblokkeerd");
+});
+
+test("autoAssign: twee dakvlakken met licht afwijkende azimuth/helling delen nu bewust één MPPT (binnen default tolerantie)", () => {
+  // Twee vlakken van 19 panelen, beide 'vrijwel zuid' maar niet identiek
+  // (176° vs 184°, 18° vs 22°) — binnen de default 20°/10°-tolerantie.
+  const strings = [
+    { n: 19, panel: JA430, azimuth: 176, helling: 18 },
+    { n: 19, panel: JA430, azimuth: 184, helling: 22 },
+  ];
+  const result = autoAssign(strings, GW_SDT40); // 2 strings/MPPT
+  assert.equal(result.overflow, false);
+  const paired = result.mppts.find((m) => m.length === 2);
+  assert.ok(paired, "beide vlakken vallen binnen tolerantie en moeten samen op één MPPT komen");
+});
+
+test("autoAssign: azimuthverschil buiten tolerantie mag nooit gemengd worden, ook al is er verder plek", () => {
+  const strings = [
+    { n: 19, panel: JA430, azimuth: 90 },
+    { n: 19, panel: JA430, azimuth: 270 },
+  ];
+  const result = autoAssign(strings, GW_SDT40, { azimuthTol: 20, tiltTol: 10 });
+  assert.equal(result.overflow, false);
+  for (const mppt of result.mppts) {
+    assert.ok(mppt.length <= 1, "oost (90°) en west (270°) liggen ver buiten tolerantie en mogen nooit één MPPT delen");
+  }
+});
+
+test("autoAssign: aangepaste (ruimere) tolerantie laat een grotere azimuth-mix toe dan de default", () => {
+  const strings = [
+    { n: 19, panel: JA430, azimuth: 150 },
+    { n: 19, panel: JA430, azimuth: 210 },
+  ];
+  const defaultResult = autoAssign(strings, GW_SDT40);
+  assert.ok(defaultResult.mppts.every((m) => m.length <= 1), "60° verschil zit buiten de default tolerantie van 20°");
+  const wideResult = autoAssign(strings, GW_SDT40, { azimuthTol: 60, tiltTol: 10 });
+  assert.ok(wideResult.mppts.some((m) => m.length === 2), "met een ingestelde tolerantie van 60° moeten ze wél samen kunnen");
+});
+
+test("checkLegplan: valt terug op falen als een handmatige toewijzing ongelijke strings op één MPPT zet", () => {
+  // autoAssign zou dit nooit produceren, maar echt-handmatige invoer kan dit
+  // wel — checkLegplan moet dit dan als falende check signaleren, niet
+  // stilzwijgend doorrekenen.
+  const strings = [
+    { n: 19, panel: JA430, azimuth: 180 },
+    { n: 19, panel: LONGI540, azimuth: 180 },
+  ];
+  const assignment = { mppts: [[0, 1]], overflow: false };
+  const inverterOneMppt = { ...GW_SDT40, nMppt: 1 };
+  const result = checkLegplan(strings, inverterOneMppt, assignment, -10, 70);
+  const eq = result.mpptResults[0].checks.find((c) => c.key === "equalStrings");
+  assert.ok(eq, "de nieuwe gelijkheids-check moet aanwezig zijn zodra er >1 string op een MPPT staat");
+  assert.equal(eq.pass, false, "twee verschillende paneeltypen op één MPPT moet falen");
+  assert.equal(result.pass, false);
 });
 
 // --- Vloot van omvormer-eenheden (multi-omvormer, echte mix) -----------------
