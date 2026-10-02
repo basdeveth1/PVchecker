@@ -7,19 +7,19 @@ import {
   CONNECTIONS,
   getConnection,
   inverterFitsConnection,
+  maxPhaseCurrent,
   findMatchingInverters,
   autoAssign,
   autoAssignFleet,
   checkLegplan,
   stringVocStc,
-  distributeSlotsEvenly,
-  splitIntoEqualMpptStrings,
+  allocateGroupsToMppts,
+  stringLengthRange,
   requiredCableCrossSection,
   CABLE_CROSS_SECTIONS,
   CABLE_INSTALL_METHODS,
   VOLTAGE_DROP_MAX_PCT,
   mpptCapacity,
-  totalMpptSlots,
   minMpptCapacity,
   DEFAULT_AZIMUTH_TOLERANCE,
   DEFAULT_TILT_TOLERANCE,
@@ -118,6 +118,11 @@ function matchExtractedPanel(extracted, availPanels) {
 // consistent "(1-fase..." of "(3-fase..."). Geen structureel phases-veld op
 // de omvormer zelf — alleen gebruikt als handig, overschrijfbaar voorstel
 // in de AC-kabel-tab, nooit als harde waarheid.
+// Standaard paneelhelling voor nieuwe dakvlakken/strings/slots en als
+// terugval wanneer een import geen helling oplevert (platte daken met
+// oost-west/zuid-opstelling: 10° is de gangbare opstelhoek).
+const DEFAULT_TILT = 10;
+
 function phasesFromFamily(family) {
   if (!family) return null;
   if (/1-fase/i.test(family)) return 1;
@@ -251,10 +256,10 @@ export default function PVConfigurator() {
   // + auto/handmatige MPPT-toewijzing, zoals de oude Legplan-check al had.
   const [designStep, setDesignStep] = useState("invoer");
   const [designStrings, setDesignStrings] = useState([
-    { n: 19, panelId: "JAM54D41-430/GB", azimuth: 323, helling: 5 },
-    { n: 19, panelId: "JAM54D41-430/GB", azimuth: 142, helling: 5 },
-    { n: 19, panelId: "JAM54D41-430/GB", azimuth: 142, helling: 5 },
-    { n: 19, panelId: "JAM54D41-430/GB", azimuth: 142, helling: 5 },
+    { n: 19, panelId: "JAM54D41-430/GB", azimuth: 323, helling: DEFAULT_TILT },
+    { n: 19, panelId: "JAM54D41-430/GB", azimuth: 142, helling: DEFAULT_TILT },
+    { n: 19, panelId: "JAM54D41-430/GB", azimuth: 142, helling: DEFAULT_TILT },
+    { n: 19, panelId: "JAM54D41-430/GB", azimuth: 142, helling: DEFAULT_TILT },
   ]);
   // Omvormerpark: lijst van { inverterId, count } — ondersteunt een echte mix
   // van verschillende typen, uitgeklapt tot genummerde eenheden (designUnits).
@@ -290,7 +295,7 @@ export default function PVConfigurator() {
   // Indeling: voorstel voor stringverdeling + omvormer uit een ruw legplan
   // (dakvlakken zonder vooraf bepaalde strings) — vult designStrings/designFleet
   // pas na expliciete "Toepassen", net als de andere extractiestromen.
-  const [roofFaces, setRoofFaces] = useState([{ count: 76, azimuth: 180, helling: 35 }]);
+  const [roofFaces, setRoofFaces] = useState([{ count: 76, azimuth: 180, helling: DEFAULT_TILT }]);
   const [roofPanelId, setRoofPanelId] = useState("JAM54D41-430/GB");
   const [roofFixedInvCount, setRoofFixedInvCount] = useState(""); // "" = automatisch optimaliseren
   const [roofImportBusy, setRoofImportBusy] = useState(false);
@@ -494,7 +499,9 @@ export default function PVConfigurator() {
     return mppts.every((m) => m.length === 0);
   }).length;
   const designTotalWp = activeStringsResolved.reduce((s, x) => s + x.n * x.panel.wp, 0);
-  const totalIacMax = designUnits.reduce((sum, u) => sum + u.inverter.iacMax, 0);
+  // Stroom op de zwaarst belaste fase (1-fase omvormers gespreid over de
+  // fasen) — maatgevend voor de aansluiting en de AC-kabel.
+  const totalIacMax = maxPhaseCurrent(designUnits.map((u) => u.inverter), conn.phases);
   const fleetFitsConn = designUnits.length === 0 || inverterFitsConnection(totalIacMax, conn.amps);
 
   const cableResult = useMemo(() => {
@@ -669,7 +676,7 @@ export default function PVConfigurator() {
     setDesignManualStrings([]);
   }
   function addDesignString() {
-    setDesignStrings((prev) => [...prev, { n: 19, panelId: availPanels[0].id, azimuth: 180, helling: 35 }]);
+    setDesignStrings((prev) => [...prev, { n: 19, panelId: availPanels[0].id, azimuth: 180, helling: DEFAULT_TILT }]);
     setDesignManualStrings([]);
   }
   function removeDesignString(idx) {
@@ -687,7 +694,7 @@ export default function PVConfigurator() {
     setDesignManualStrings((prev) => {
       const idx = prev.findIndex((s) => s.unitIdx === unitIdx && s.mpptIdx === mpptIdx && s.slotIdx === slotIdx);
       if (idx === -1) {
-        const base = { unitIdx, mpptIdx, slotIdx, panelId: availPanels[0]?.id, n: 0, azimuth: 180, helling: 35 };
+        const base = { unitIdx, mpptIdx, slotIdx, panelId: availPanels[0]?.id, n: 0, azimuth: 180, helling: DEFAULT_TILT };
         return [...prev, { ...base, ...patch }];
       }
       const next = [...prev];
@@ -738,7 +745,7 @@ export default function PVConfigurator() {
     setRoofMatches(null);
   }
   function addRoofFace() {
-    setRoofFaces((prev) => [...prev, { count: 20, azimuth: 180, helling: 35 }]);
+    setRoofFaces((prev) => [...prev, { count: 20, azimuth: 180, helling: DEFAULT_TILT }]);
     setRoofMatches(null);
   }
   function removeRoofFace(idx) {
@@ -765,7 +772,7 @@ export default function PVConfigurator() {
         method: "POST",
         body: JSON.stringify({ imageBase64: base64, mediaType }),
       });
-      setRoofFaces(data.roofFaces.map((f) => ({ count: f.count ?? 1, azimuth: f.azimuth ?? 180, helling: f.helling ?? 35 })));
+      setRoofFaces(data.roofFaces.map((f) => ({ count: f.count ?? 1, azimuth: f.azimuth ?? 180, helling: f.helling ?? DEFAULT_TILT })));
       const matchedPanelId = matchExtractedPanel({ wp: data.panelWp, fabrikant: data.panelFabrikant }, availPanels);
       if (matchedPanelId) setRoofPanelId(matchedPanelId);
       setRoofMatches(null);
@@ -783,21 +790,20 @@ export default function PVConfigurator() {
     const panel = availPanels.find((p) => p.id === roofPanelId) || availPanels[0];
     const totalPanels = roofFaces.reduce((s, f) => s + (+f.count || 0), 0);
     const fixedInvCount = roofFixedInvCount ? Math.max(1, +roofFixedInvCount) : undefined;
-    setRoofMatches(findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters: availInverters, fixedInvCount }));
+    setRoofMatches(findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters: availInverters, fixedInvCount, connAmps: conn.amps, connPhases: conn.phases }));
   }
 
   function applyRoofSuggestion(match) {
-    const cap = minMpptCapacity(match.inverter);
-    const totalSlots = totalMpptSlots(match.inverter) * match.invCount;
-    const groupsWithMax = roofFaces.map((f) => ({ count: +f.count || 0, azimuth: f.azimuth, helling: f.helling, maxPerString: match.nPerString }));
-    const allocation = distributeSlotsEvenly(groupsWithMax, totalSlots);
-    if (!allocation) {
+    const panel = availPanels.find((p) => p.id === roofPanelId) || availPanels[0];
+    const minPerString = stringLengthRange(panel, match.inverter, tMinCold, tMaxHot)?.min ?? 1;
+    const groups = roofFaces
+      .filter((f) => (+f.count || 0) > 0)
+      .map((f) => ({ count: +f.count, panelId: roofPanelId, azimuth: f.azimuth, helling: f.helling, minPerString, maxPerString: match.nPerString }));
+    const strings = allocateGroupsToMppts(groups, match.inverter.nMppt * match.invCount, minMpptCapacity(match.inverter));
+    if (!strings) {
       setRoofImportError(`Te veel panelen voor de beschikbare MPPT-capaciteit van ${match.inverter.id} (×${match.invCount}) — voorstel niet toegepast.`);
       return;
     }
-    const strings = allocation.flatMap((g) =>
-      splitIntoEqualMpptStrings(g.count, cap, g.maxPerString, g.slots).map((n) => ({ n, panelId: roofPanelId, azimuth: g.azimuth, helling: g.helling }))
-    );
     setDesignStrings(strings);
     setDesignFleet([{ inverterId: match.inverter.id, count: match.invCount }]);
     setDesignManualStrings([]);
@@ -809,9 +815,9 @@ export default function PVConfigurator() {
   // Herindeelt de huidige panelen (per dakvlak/oriëntatie) over de gekozen
   // omvormer, met de panelen zo gelijk mogelijk verdeeld over ALLE
   // beschikbare MPPT/string-slots (i.p.v. het minimum aantal strings te
-  // pakken en slots ongebruikt te laten) — via distributeSlotsEvenly, met
+  // pakken en slots ongebruikt te laten) — via allocateGroupsToMppts, met
   // per dakvlak de Voc-veilige maximale stringlengte (findMatchingInverters)
-  // als harde ondergrens op het aantal slots.
+  // en de Vmp-minimale lengte (stringLengthRange) als harde grenzen.
   function recomputeStringsForSelectedInverter() {
     setRecomputeError(null);
     if (designFleet.length !== 1 || designStringsResolved.length === 0) return;
@@ -835,8 +841,9 @@ export default function PVConfigurator() {
         failedPanels.push(panelId);
         continue;
       }
+      const minPerString = stringLengthRange(panel, inverter, tMinCold, tMaxHot)?.min ?? 1;
       for (const face of roofFacesForType) {
-        groupsWithMax.push({ panelId, count: face.count, azimuth: face.azimuth, helling: face.helling, maxPerString: matches[0].nPerString });
+        groupsWithMax.push({ panelId, count: face.count, azimuth: face.azimuth, helling: face.helling, minPerString, maxPerString: matches[0].nPerString });
       }
     }
 
@@ -845,16 +852,11 @@ export default function PVConfigurator() {
       return;
     }
 
-    const totalSlots = totalMpptSlots(inverter) * row.count;
-    const allocation = distributeSlotsEvenly(groupsWithMax, totalSlots);
-    if (!allocation) {
+    const newStrings = allocateGroupsToMppts(groupsWithMax, inverter.nMppt * row.count, minMpptCapacity(inverter));
+    if (!newStrings) {
       setRecomputeError(`Te veel panelen voor de beschikbare MPPT-capaciteit van ${inverter.id} (×${row.count}) — strings niet aangepast.`);
       return;
     }
-    const cap = minMpptCapacity(inverter);
-    const newStrings = allocation.flatMap((g) =>
-      splitIntoEqualMpptStrings(g.count, cap, g.maxPerString, g.slots).map((n) => ({ n, panelId: g.panelId, azimuth: g.azimuth, helling: g.helling }))
-    );
 
     setDesignStrings(newStrings);
     setDesignManualStrings([]);
@@ -1339,7 +1341,7 @@ export default function PVConfigurator() {
       const rows = data.strings.map((s) => ({
         n: s.n ?? 1,
         azimuth: s.azimuth ?? 180,
-        helling: s.helling ?? 35,
+        helling: s.helling ?? DEFAULT_TILT,
         panelId: matchExtractedPanel(s, availPanels) || availPanels[0].id,
         extractedWp: s.wp,
         extractedFabrikant: s.fabrikant,
@@ -1384,6 +1386,19 @@ export default function PVConfigurator() {
     >
       {text}
     </button>
+  );
+
+  // Grote, onmiskenbare waarschuwing wanneer de opgetelde max. uitgangsstroom
+  // van de omvormers boven de hoofdaansluiting (A per fase) uitkomt — gebruikt
+  // bij de voorstellen, in de Indeling en in het Resultaat.
+  const renderConnOverloadWarning = (totalA, invLabel) => (
+    <div role="alert" style={{ display: "flex", gap: 10, alignItems: "flex-start", padding: "12px 14px", marginTop: 10, borderRadius: "var(--border-radius-md)", background: "var(--color-background-danger)", border: "2px solid var(--color-border-danger)" }}>
+      <i className="ti ti-alert-octagon" style={{ fontSize: 24, color: "var(--color-text-danger)" }} aria-hidden="true" />
+      <div style={{ fontSize: 13, color: "var(--color-text-danger)" }}>
+        <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 2 }}>Overschrijdt de hoofdaansluiting</div>
+        Max. uitgangsstroom {invLabel ? `van ${invLabel} ` : ""}op de zwaarst belaste fase is <b>{totalA.toFixed(1)} A</b>, de aansluiting is {conn.phases}×{conn.amps} A. Verzwaren van de aansluiting en aanpassing van de verdeelkast nodig, of kies minder/kleinere omvormers.
+      </div>
+    </div>
   );
 
   // Gedeeld door de AC-kabel-kaart in "Ontwerp checken" (Resultaat-stap) en
@@ -1793,12 +1808,18 @@ export default function PVConfigurator() {
                             {i === 0 && <span style={{ background: "var(--color-background-info)", color: "var(--color-text-info)", fontSize: 12, padding: "3px 10px", borderRadius: "var(--border-radius-md)" }}>Beste match</span>}
                           </div>
                           <div style={{ fontSize: 13, marginTop: 8 }}>
-                            {m.stringsTotal} strings × {m.nPerString} panelen · {(m.totalWp / 1000).toFixed(1)} kWp op {(m.totalAc / 1000).toFixed(1)} kW AC
+                            {m.invCount * m.inverter.nMppt} MPPT's · strings van max. {m.nPerString} panelen, gelijk verdeeld · {(m.totalWp / 1000).toFixed(1)} kWp op {(m.totalAc / 1000).toFixed(1)} kW AC
                           </div>
                           <div style={{ fontSize: 13, marginTop: 4 }}>
                             <span style={muted}>Overdimensionering: </span>
                             <b style={{ color: m.highOverdim ? "var(--color-text-warning)" : "var(--color-text-primary)" }}>{(m.dcAcRatio * 100).toFixed(0)}%</b>
                           </div>
+                          <div style={{ fontSize: 13, marginTop: 4 }}>
+                            <span style={muted}>Uitgangsstroom: </span>
+                            <b style={{ color: m.fitsConn ? "var(--color-text-primary)" : "var(--color-text-danger)" }}>{m.totalIacMax.toFixed(1)} A</b>
+                            <span style={muted}> / {conn.amps} A aansluiting</span>
+                          </div>
+                          {!m.fitsConn && renderConnOverloadWarning(m.totalIacMax, `${m.invCount}× ${m.inverter.id}`)}
                           <button
                             onClick={() => applyRoofSuggestion(m)}
                             style={{ marginTop: 10, padding: "6px 14px", border: "none", borderRadius: "var(--border-radius-md)", background: "var(--color-background-info)", color: "var(--color-text-info)", cursor: "pointer", fontWeight: 500, fontSize: 12 }}
@@ -1916,12 +1937,13 @@ export default function PVConfigurator() {
                     <i className="ti ti-plus" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} /> Omvormertype toevoegen
                   </button>
                   <div style={{ fontSize: 12, ...muted, marginBottom: 8 }}>
-                    Totaal: {designUnits.length} eenhe{designUnits.length === 1 ? "id" : "den"} · {designUnits.reduce((s, u) => s + u.inverter.nMppt, 0)} MPPT-slots
+                    Totaal: {designUnits.length} eenhe{designUnits.length === 1 ? "id" : "den"} · {designUnits.reduce((s, u) => s + u.inverter.nMppt, 0)} MPPT-slots · {totalIacMax.toFixed(1)} A uitgang
                   </div>
+                  {!fleetFitsConn && <div style={{ marginBottom: 8 }}>{renderConnOverloadWarning(totalIacMax)}</div>}
                   {designAssignMode === "auto" && designUnusedUnitCount > 0 && (
                     <div style={{ fontSize: 12, color: "var(--color-text-warning)", marginBottom: 8 }}>
                       <i className="ti ti-alert-triangle" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} />
-                      {designUnusedUnitCount} van de {designUnits.length} omvormers krijgt{designUnusedUnitCount === 1 ? "" : "en"} geen panelen toegewezen — bij dit aantal panelen en deze stringlengte zijn niet alle omvormers nodig. Verklein het aantal omvormers, of gebruik "Strings herindelen" met een kortere stringlengte om ze wel allemaal te benutten.
+                      {designUnusedUnitCount} van de {designUnits.length} omvormers krijgt{designUnusedUnitCount === 1 ? "" : "en"} geen panelen toegewezen — er zijn te weinig panelen om ze allemaal te vullen met strings die nog binnen het MPPT-spanningsbereik vallen (Vmp bij {tMaxHot}°C). Verklein het aantal omvormers, of klik eerst "Strings herindelen" als je dat nog niet gedaan hebt.
                     </div>
                   )}
                   {designFleet.length === 1 && designStrings.length > 0 && (
@@ -1945,7 +1967,7 @@ export default function PVConfigurator() {
                     <button onClick={() => setDesignAssignMode("auto")} style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: designAssignMode === "auto" ? "var(--color-background-info)" : "transparent", color: designAssignMode === "auto" ? "var(--color-text-info)" : "var(--color-text-primary)" }}>Automatisch</button>
                     <button onClick={enterManualMode} style={{ flex: 1, fontSize: 13, padding: "6px", borderRadius: "var(--border-radius-md)", border: "0.5px solid var(--color-border-secondary)", cursor: "pointer", background: designAssignMode === "manual" ? "var(--color-background-info)" : "transparent", color: designAssignMode === "manual" ? "var(--color-text-info)" : "var(--color-text-primary)" }}>Handmatig</button>
                   </div>
-                  <div style={{ fontSize: 12, ...muted, marginTop: 6 }}>Automatisch houdt zelfde oriëntatie op zelfde MPPT en vult eenheden op volgorde. Bij een mix van typen: gebruik Handmatig om per MPPT-slot zelf paneeltype en aantal in te vullen.</div>
+                  <div style={{ fontSize: 12, ...muted, marginTop: 6 }}>Automatisch houdt zelfde oriëntatie op zelfde MPPT en verdeelt de strings gelijkmatig over alle eenheden (naar verhouding van hun AC-vermogen). Bij een mix van typen: gebruik Handmatig om per MPPT-slot zelf paneeltype en aantal in te vullen.</div>
                   {designAssignMode === "auto" && (
                     <div style={{ display: "flex", gap: 16, marginTop: 10, paddingTop: 10, borderTop: "0.5px solid var(--color-border-tertiary)" }}>
                       <div>
@@ -2027,7 +2049,7 @@ export default function PVConfigurator() {
                                       <span style={{ fontSize: 11, ...muted }}>Hel</span>
                                       <input
                                         type="number"
-                                        value={slot?.helling ?? 35}
+                                        value={slot?.helling ?? DEFAULT_TILT}
                                         onChange={(e) => updateManualSlot(uIdx, mIdx, slotIdx, { helling: Number(e.target.value) })}
                                         style={{ width: 55, fontSize: 12 }}
                                       />
@@ -2101,6 +2123,7 @@ export default function PVConfigurator() {
                     Past niet? Pas het omvormerpark in de Indeling-stap aan, of ga terug naar Invoer om de dakvlakken opnieuw te laten matchen met een ander aantal omvormers.
                   </div>
                 )}
+                {!fleetFitsConn && renderConnOverloadWarning(totalIacMax)}
               </div>
 
               <div style={{ ...card, marginBottom: 20, background: "var(--color-background-warning)", border: "none" }}>
@@ -2109,7 +2132,7 @@ export default function PVConfigurator() {
                   <div style={{ fontSize: 13, color: "var(--color-text-warning)" }}>
                     <b>Let op — verdeelkast klant.</b> De verdeelkast moet de opgetelde stromen aankunnen: de hoofdaansluiting ({conn.phases}×{conn.amps} A) plus de uitgangsstroom van alle omvormereenheden samen.
                     <div style={{ marginTop: 4 }}>
-                      Aansluiting {conn.phases}×{conn.amps} A + omvormer-uitgang totaal {totalIacMax.toFixed(1)} A ({designUnits.length}×)
+                      Aansluiting {conn.phases}×{conn.amps} A + omvormer-uitgang zwaarste fase {totalIacMax.toFixed(1)} A ({designUnits.length}×)
                       {" = "}<b>{conn.amps} A + {totalIacMax.toFixed(1)} A ≈ {(conn.amps + totalIacMax).toFixed(0)} A per fase</b> die door de kast moet kunnen lopen.
                       {conn.phases === 1 && <span> (1-fase: alles op één fase)</span>}
                     </div>

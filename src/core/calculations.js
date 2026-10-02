@@ -94,6 +94,33 @@ export function inverterFitsConnection(iacMaxTotal, connAmpsPerPhase) {
   return iacMaxTotal <= connAmpsPerPhase;
 }
 
+// Aantal fasen van een omvormer: expliciet `phases`, anders afgeleid uit de
+// familienaam ("… (1-fase)" / "… (3-fase …)"); onbekend → 3 (dan telt de
+// stroom op elke fase mee, de conservatieve aanname).
+export function inverterPhases(inverter) {
+  if (inverter.phases === 1 || inverter.phases === 3) return inverter.phases;
+  if (/1-fase/i.test(inverter.family || "")) return 1;
+  return 3;
+}
+
+// Stroom op de zwaarst belaste fase als al deze omvormers op één aansluiting
+// terugleveren. Een 3-fase omvormer belast elke fase met zijn iacMax; 1-fase
+// omvormers worden op een 3-fase aansluiting over de fasen gespreid (steeds
+// op de minst belaste fase, grootste eerst). Op een 1-fase aansluiting komt
+// alles op dezelfde fase.
+export function maxPhaseCurrent(inverters, connPhases) {
+  const phaseA = connPhases === 1 ? [0] : [0, 0, 0];
+  for (const inv of inverters) {
+    if (inverterPhases(inv) === 3) for (let p = 0; p < phaseA.length; p++) phaseA[p] += inv.iacMax;
+  }
+  const singles = inverters.filter((inv) => inverterPhases(inv) === 1).sort((a, b) => b.iacMax - a.iacMax);
+  for (const inv of singles) {
+    const p = phaseA.indexOf(Math.min(...phaseA));
+    phaseA[p] += inv.iacMax;
+  }
+  return Math.max(...phaseA);
+}
+
 // ----------------------------------------------------------------------------
 // MPPT-capaciteit: stringsPerMppt is meestal één getal (uniform, gelijk voor
 // elke MPPT), maar mag ook een array van nMppt waarden zijn voor omvormers
@@ -258,6 +285,98 @@ export function splitIntoEqualMpptStrings(count, cap, maxPerString, targetSlots)
   return strings;
 }
 
+// Spanningsgrenzen bepalen samen welke stringlengtes op deze omvormer mogen:
+// te lang → Voc (koud) of Vmp (koud) boven de grens, te kort → Vmp (warm)
+// onder het MPPT-bereik. Geeft { min, max } of null als geen enkele lengte
+// past. Stroom/aantal strings per MPPT speelt hier niet mee (dat hangt af van
+// de parallelschakeling, niet van de lengte).
+export function stringLengthRange(panel, inverter, tMinCold, tMaxHot) {
+  let min = null;
+  let max = null;
+  for (let n = 1; n <= 80; n++) {
+    const ok =
+      vocAtTemp(panel.voc, panel.betaVoc, tMinCold) * n < inverter.vmax &&
+      panel.voc * n < inverter.vmax &&
+      vmpAtTemp(panel.vmp, panel.betaVoc, tMinCold) * n <= inverter.vmpptMax &&
+      vmpAtTemp(panel.vmp, panel.betaVoc, tMaxHot) * n >= inverter.vmpptMin;
+    if (ok) {
+      if (min === null) min = n;
+      max = n;
+    }
+  }
+  return min === null ? null : { min, max };
+}
+
+// Verdeelt `count` panelen van één dakvlak over precies `mppts` MPPT's met elk
+// `cap` string-slots, zo gelijk mogelijk over ALLE strings — met de harde eis
+// dat parallelle strings op één MPPT exact even lang zijn. Alle strings
+// verschillen hooguit 1 paneel: S strings krijgen floor(count/S) of één meer,
+// en de langere en kortere strings komen elk op hun eigen MPPT's (58 panelen
+// over 4 MPPT × 2 geeft [[8,8],[7,7],[7,7],[7,7]]). Kiest het grootste
+// aantal strings S (≤ mppts × cap) waarbij de lengte binnen [minPerString,
+// maxPerString] blijft; MPPT's die daardoor geen tweede string krijgen,
+// houden er één (nooit een MPPT leeg zolang er genoeg panelen zijn). Lukt het
+// met `mppts` niet, dan één MPPT minder, enz. Geeft per MPPT de lijst
+// stringlengtes, of null als het nergens past.
+export function splitGroupOverMppts(count, mppts, cap, minPerString, maxPerString) {
+  if (count <= 0 || maxPerString < minPerString) return null;
+  for (let m = Math.min(mppts, count); m >= 1; m--) {
+    for (let S = m * cap; S >= m; S--) {
+      const base = Math.floor(count / S);
+      const r = count - base * S; // aantal strings van base+1 (altijd < S)
+      if (base < minPerString || (r > 0 ? base + 1 : base) > maxPerString) continue;
+      const mLong = Math.max(Math.ceil(r / cap), m - (S - r));
+      const mShort = m - mLong;
+      if (mLong > r || mShort < Math.ceil((S - r) / cap)) continue;
+      const longSizes = mLong > 0 ? distributeCounts(r, mLong) : [];
+      const shortSizes = distributeCounts(S - r, mShort);
+      return [...longSizes.map((k) => Array(k).fill(base + 1)), ...shortSizes.map((k) => Array(k).fill(base))];
+    }
+  }
+  return null;
+}
+
+// Verdeelt dakvlak-groepen ({ count, minPerString, maxPerString, ...rest })
+// over `totalMppts` MPPT's (van het hele omvormerpark) met elk `cap`
+// string-slots. Werkt op MPPT-niveau i.p.v. slot-niveau: elke groep krijgt
+// eerst het minimum aantal MPPT's waarmee ze geldig past, daarna gaat elke
+// resterende MPPT naar de groep met op dat moment de meeste panelen per MPPT
+// (zolang die groep er nog een string van ≥ minPerString op kwijt kan).
+// Binnen een groep doet splitGroupOverMppts de gelijke verdeling. Geeft een
+// platte strings-lijst ({ ...rest, n }), of null als het niet past.
+export function allocateGroupsToMppts(groups, totalMppts, cap) {
+  if (groups.length === 0) return [];
+  const minOf = (g) => g.minPerString ?? 1;
+  const m = [];
+  for (const g of groups) {
+    let need = Math.max(1, Math.ceil(g.count / (cap * g.maxPerString)));
+    while (need <= totalMppts && !splitGroupOverMppts(g.count, need, cap, minOf(g), g.maxPerString)) need++;
+    m.push(need);
+  }
+  let extra = totalMppts - m.reduce((a, b) => a + b, 0);
+  if (extra < 0) return null;
+  while (extra > 0) {
+    let best = -1;
+    let bestAvg = -Infinity;
+    groups.forEach((g, i) => {
+      if (g.count / (m[i] + 1) < minOf(g)) return;
+      const avg = g.count / m[i];
+      if (avg > bestAvg) {
+        bestAvg = avg;
+        best = i;
+      }
+    });
+    if (best === -1) break;
+    m[best]++;
+    extra--;
+  }
+  return groups.flatMap((g, i) => {
+    const { count, minPerString, maxPerString, ...rest } = g;
+    const perMppt = splitGroupOverMppts(count, m[i], cap, minOf(g), maxPerString);
+    return perMppt.flat().map((n) => ({ ...rest, n }));
+  });
+}
+
 // ----------------------------------------------------------------------------
 // AC-kabel: aderdikte tussen meterkast/verdeelkast en omvormer(s)
 // ----------------------------------------------------------------------------
@@ -359,7 +478,13 @@ export function checkAcCable({ crossSection, current, length, phases, installMet
 // `fixedInvCount`: reken met een vast aantal omvormers (bijv. omdat een pand
 // een vast aantal aansluitingen heeft) in plaats van te optimaliseren naar
 // het minimum — vindt dan de beste stringlengte gegeven dat vaste aantal.
-export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters, fixedInvCount }) {
+// Optioneel `connAmps` (A per fase van de hoofdaansluiting, met `connPhases`,
+// standaard 3): elk resultaat krijgt dan totalIacMax (stroom op de zwaarst
+// belaste fase, zie maxPhaseCurrent) en fitsConn, en voorstellen die
+// binnen de aansluiting blijven staan bovenaan — een omvormerpark dat meer
+// stroom terug kan leveren dan de aansluiting aankan is geen goed voorstel,
+// ook niet als het een GoodWe is.
+export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters, fixedInvCount, connAmps, connPhases = 3 }) {
   const results = [];
   const totalWp = totalPanels * panel.wp;
 
@@ -390,15 +515,19 @@ export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, i
       if (allPass(checks) && powerOk) {
         const inBand = dcAcRatio >= OVERDIM_MIN && dcAcRatio <= OVERDIM_MAX;
         const highOverdim = dcAcRatio > OVERDIM_MAX;
-        best = { nPerString: nPer, stringsTotal, invCount, stringsPerInv, stringsPerMpptUsed, totalWp, totalAc: inv.pacNom * invCount, dcAcRatio, inBand, highOverdim };
+        const totalIacMax = maxPhaseCurrent(Array(invCount).fill(inv), connPhases);
+        const fitsConn = connAmps == null || inverterFitsConnection(totalIacMax, connAmps);
+        best = { nPerString: nPer, stringsTotal, invCount, stringsPerInv, stringsPerMpptUsed, totalWp, totalAc: inv.pacNom * invCount, dcAcRatio, inBand, highOverdim, totalIacMax, fitsConn };
         break;
       }
     }
     if (best) results.push({ inverter: inv, ...best });
   }
 
-  // GoodWe bovenaan → in-band → minste omvormers → dichtst bij 135%.
+  // Past op aansluiting → GoodWe bovenaan → in-band → minste omvormers →
+  // dichtst bij 135%.
   results.sort((a, b) => {
+    if (a.fitsConn !== b.fitsConn) return a.fitsConn ? -1 : 1;
     if (!!a.inverter.isGoodwe !== !!b.inverter.isGoodwe) return a.inverter.isGoodwe ? -1 : 1;
     if (a.inBand !== b.inBand) return a.inBand ? -1 : 1;
     if (a.invCount !== b.invCount) return a.invCount - b.invCount;
@@ -463,9 +592,22 @@ export function autoAssign(strings, inverter, tolerances = {}) {
 // Verdeelt strings over een vloot van (mogelijk verschillende) omvormer-
 // eenheden. Zelfde heuristiek als autoAssign (oriëntatie/tolerantie eerst,
 // dan capaciteit), nu over alle MPPT-slots van de hele vloot heen.
+// Gebalanceerd: elke string gaat naar de eenheid die relatief (toegewezen
+// Wp / pacNom) het minst belast is — bij gelijke belasting liever bijschuiven
+// op een MPPT met ruimte dan een nieuwe openen. Zo wordt een bewust gekozen
+// omvormerpark gelijkmatig gevuld i.p.v. eenheid na eenheid (waarbij de
+// laatste eenheden leeg of half gevuld bleven). Een nieuwe MPPT openen terwijl
+// bijschuiven ook kon gebeurt alleen als de resterende strings daarna nog
+// gegarandeerd passen; mocht de gebalanceerde verdeling toch niet passen, dan
+// valt hij terug op de oude, sequentiële vulling.
 // Elektrische geschiktheid per type wordt hier niet gecheckt — dat doet
 // checkLegplan, per eenheid, achteraf (net als bij één omvormer).
 export function autoAssignFleet(strings, units, tolerances = {}) {
+  const balanced = assignFleetPass(strings, units, tolerances, true);
+  return balanced.overflow ? assignFleetPass(strings, units, tolerances, false) : balanced;
+}
+
+function assignFleetPass(strings, units, tolerances, balance) {
   const unitMppts = units.map((u) => Array.from({ length: u.inverter.nMppt }, () => []));
   const slots = [];
   units.forEach((u, uIdx) => {
@@ -474,6 +616,13 @@ export function autoAssignFleet(strings, units, tolerances = {}) {
     }
   });
   const arrOf = (s) => unitMppts[s.uIdx][s.mIdx];
+  const unitWp = units.map(() => 0);
+  const loadOf = (sl) => unitWp[sl.uIdx] / (units[sl.uIdx].inverter.pacNom || 1);
+  const canJoin = (sl, s) => {
+    const a = arrOf(sl);
+    return a.length > 0 && a.length < sl.cap && canShareMppt(strings[a[0]], s, tolerances);
+  };
+  const lowestLoad = (cands) => cands.reduce((best, sl) => (best === null || loadOf(sl) < loadOf(best) - 1e-9 ? sl : best), null);
 
   const byAz = {};
   strings.forEach((s, i) => {
@@ -481,15 +630,51 @@ export function autoAssignFleet(strings, units, tolerances = {}) {
   });
   const ordered = Object.values(byAz).sort((a, b) => b.length - a.length).flat();
 
-  for (const si of ordered) {
+  // Passen de nog te plaatsen strings (vanaf positie `from`) gegarandeerd in
+  // de huidige vrije ruimte? Per groep identieke strings: eerst bijschuiven
+  // op open MPPT's waar ze mogen, de rest op lege MPPT's (conservatief
+  // gerekend met de kleinste capaciteit van de lege MPPT's).
+  const restFits = (from) => {
+    const classes = new Map();
+    for (let i = from; i < ordered.length; i++) {
+      const s = strings[ordered[i]];
+      const key = `${s.n}|${s.panelId ?? s.panel?.id}|${s.azimuth}|${s.helling ?? 0}`;
+      if (!classes.has(key)) classes.set(key, { rep: s, count: 0 });
+      classes.get(key).count++;
+    }
+    const empty = slots.filter((sl) => arrOf(sl).length === 0);
+    const emptyCap = empty.length ? Math.min(...empty.map((sl) => sl.cap)) : 1;
+    let need = 0;
+    for (const { rep, count } of classes.values()) {
+      const room = slots.reduce((sum, sl) => sum + (canJoin(sl, rep) ? sl.cap - arrOf(sl).length : 0), 0);
+      need += Math.max(0, Math.ceil((count - room) / emptyCap));
+    }
+    return need <= empty.length;
+  };
+
+  for (let idx = 0; idx < ordered.length; idx++) {
+    const si = ordered[idx];
     const s = strings[si];
-    let target = slots.find((sl) => {
-      const a = arrOf(sl);
-      return a.length > 0 && a.length < sl.cap && canShareMppt(strings[a[0]], s, tolerances);
-    });
-    if (!target) target = slots.find((sl) => arrOf(sl).length === 0);
+    let target;
+    if (!balance) {
+      target = slots.find((sl) => canJoin(sl, s)) || slots.find((sl) => arrOf(sl).length === 0) || null;
+    } else {
+      const join = lowestLoad(slots.filter((sl) => canJoin(sl, s)));
+      const open = lowestLoad(slots.filter((sl) => arrOf(sl).length === 0));
+      if (join && (!open || loadOf(join) <= loadOf(open) + 1e-9)) {
+        target = join;
+      } else if (open && join) {
+        arrOf(open).push(si);
+        const ok = restFits(idx + 1);
+        arrOf(open).pop();
+        target = ok ? open : join;
+      } else {
+        target = open;
+      }
+    }
     if (!target) return { units: unitMppts, overflow: true };
     arrOf(target).push(si);
+    unitWp[target.uIdx] += s.n * (s.panel?.wp ?? 1);
   }
   return { units: unitMppts, overflow: false };
 }

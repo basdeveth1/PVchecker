@@ -26,6 +26,11 @@ import {
   buildStringsFromRoofFaces,
   distributeSlotsEvenly,
   splitIntoEqualMpptStrings,
+  splitGroupOverMppts,
+  allocateGroupsToMppts,
+  stringLengthRange,
+  maxPhaseCurrent,
+  inverterPhases,
   mpptCapacity,
   totalMpptSlots,
   minMpptCapacity,
@@ -367,27 +372,38 @@ test("checkLegplan: valt terug op falen als een handmatige toewijzing ongelijke 
 
 // --- Vloot van omvormer-eenheden (multi-omvormer, echte mix) -----------------
 
-test("autoAssignFleet: 2 eenheden van hetzelfde type — tweede pas gevuld als eerste vol is", () => {
-  const strings = Array.from({ length: 6 }, () => ({ n: 19, panel: JA430, azimuth: 180 }));
+test("autoAssignFleet: 2 eenheden van hetzelfde type — gelijkmatig over beide verdeeld", () => {
+  // Was: eenheid na eenheid vullen (eerste vol, dan pas de tweede). Bij een
+  // bewust gekozen omvormerpark moeten alle eenheden gelijk belast worden
+  // (testlead 1234, 2026-10-02: laatste omvormers bleven leeg).
+  const strings = Array.from({ length: 4 }, () => ({ n: 19, panel: JA430, azimuth: 180 }));
   const units = [{ inverter: T20 }, { inverter: T20 }]; // elk 3 MPPT × 1 string/MPPT
   const result = autoAssignFleet(strings, units);
   assert.equal(result.overflow, false);
-  assert.equal(result.units[0].flat().length, 3, "eerste eenheid moet volledig gevuld raken (3 slots)");
-  assert.equal(result.units[1].flat().length, 3, "resterende 3 strings moeten op de tweede eenheid landen");
-  assert.deepEqual(result.units[0].flat().sort(), [0, 1, 2]);
-  assert.deepEqual(result.units[1].flat().sort(), [3, 4, 5]);
+  assert.equal(result.units[0].flat().length, 2);
+  assert.equal(result.units[1].flat().length, 2);
 });
 
-test("autoAssignFleet: echte mix van twee verschillende omvormertypen", () => {
-  // T20 (3 MPPT × 1 string) raakt vol, de rest loopt over naar de GW40K
-  // (4 MPPT × 2 strings) — ongeacht dat het een ander type is.
-  const strings = Array.from({ length: 5 }, () => ({ n: 19, panel: JA430, azimuth: 90 }));
+test("autoAssignFleet: echte mix van twee verschillende omvormertypen, belasting naar verhouding van pacNom", () => {
+  // T20 (20 kW, 3 MPPT × 1) + GW40K (40 kW, 4 MPPT × 2): de GW40K hoort
+  // ruwweg twee keer zoveel strings te krijgen.
+  const strings = Array.from({ length: 6 }, () => ({ n: 19, panel: JA430, azimuth: 90 }));
   const units = [{ inverter: T20 }, { inverter: GW_SDT40 }];
   const result = autoAssignFleet(strings, units);
   assert.equal(result.overflow, false);
-  assert.equal(result.units[0].flat().length, 3, "T20-eenheid moet vol raken (3 slots)");
-  assert.equal(result.units[1].flat().length, 2, "de overige 2 strings moeten op de GW40K-eenheid landen");
-  assert.deepEqual(result.units[1][0].sort(), [3, 4], "zelfde oriëntatie moet samen op één MPPT van de tweede eenheid komen");
+  assert.equal(result.units[0].flat().length, 2, "T20 krijgt 2 strings");
+  assert.equal(result.units[1].flat().length, 4, "GW40K krijgt 4 strings");
+  for (const m of result.units[1]) assert.ok(m.length === 0 || m.length === 2, "strings op de GW40K in paren per MPPT");
+});
+
+test("autoAssignFleet: gebalanceerd vullen mag nooit overflow veroorzaken die sequentieel niet had", () => {
+  // 6×13 + 2×12 op 2 eenheden × 2 MPPT × 2 = precies 8 slots: alleen te
+  // plaatsen als de 13-ers in paren blijven.
+  const INV22 = { id: "TEST-2x2", nMppt: 2, stringsPerMppt: 2, pacNom: 10000 };
+  const strings = [...Array(6).fill(13), ...Array(2).fill(12)].map((n) => ({ n, panel: JA430, azimuth: 180 }));
+  const result = autoAssignFleet(strings, [{ inverter: INV22 }, { inverter: INV22 }]);
+  assert.equal(result.overflow, false);
+  for (const u of result.units) for (const m of u) assert.equal(new Set(m.map((i) => strings[i].n)).size, 1);
 });
 
 test("autoAssignFleet: overflow wanneer de vloot te klein is voor het aantal strings", () => {
@@ -583,4 +599,110 @@ test("checkAcCable: 1,5mm² op de lange 3-fase kabel faalt specifiek op spanning
 test("requiredCableCrossSection: geeft null als geen enkele doorsnede tot 95mm² voldoet", () => {
   const res = requiredCableCrossSection({ current: 500, length: 15, phases: 3, installMethod: "b1" });
   assert.equal(res, null);
+});
+
+// --- Gelijkmatige verdeling op MPPT-niveau (2026-10-02) ---------------------
+// Oude aanpak (slots per dakvlak + exacte deler) gaf o.a. 76 panelen op
+// 3 MPPT × 2 als [19,19,19,19] (2 slots leeg) en vulde bij een fallback de
+// eerste MPPT's tot de max. Nu: alle strings ≤1 paneel verschil, parallelle
+// strings op één MPPT altijd exact gelijk.
+
+const flatSorted = (perMppt) => perMppt.flat().sort((a, b) => b - a);
+
+test("stringLengthRange: JA430 op T20 bij -10/70°C → 8 t/m 23", () => {
+  assert.deepEqual(stringLengthRange(JA430, T20, -10, 70), { min: 8, max: 23 });
+});
+
+test("splitGroupOverMppts: 76 panelen over 3 MPPT × 2 → alle 6 slots, 13/13/13/13/12/12", () => {
+  const res = splitGroupOverMppts(76, 3, 2, 5, 26);
+  assert.deepEqual(flatSorted(res), [13, 13, 13, 13, 12, 12]);
+  for (const m of res) assert.equal(new Set(m).size, 1, "parallelle strings gelijk");
+});
+
+test("splitGroupOverMppts: 58 panelen over 4 MPPT × 2 → 8/8 + 3× 7/7", () => {
+  assert.deepEqual(splitGroupOverMppts(58, 4, 2, 5, 26), [[8, 8], [7, 7], [7, 7], [7, 7]]);
+});
+
+test("splitGroupOverMppts: oneven aantal bij cap 2 → één MPPT met één string, geen MPPT leeg", () => {
+  const res = splitGroupOverMppts(25, 2, 2, 5, 26);
+  assert.equal(res.length, 2);
+  assert.deepEqual(flatSorted(res), [9, 8, 8]);
+  for (const m of res) assert.equal(new Set(m).size, 1);
+});
+
+test("splitGroupOverMppts: te weinig panelen voor alle MPPT's binnen min. stringlengte → minder MPPT's", () => {
+  // 12 panelen, min 8 per string: maar één string mogelijk.
+  assert.deepEqual(splitGroupOverMppts(12, 3, 1, 8, 23), [[12]]);
+  assert.equal(splitGroupOverMppts(5, 3, 1, 8, 23), null);
+});
+
+test("allocateGroupsToMppts: 300 panelen over 3× GW40K → 100 per omvormer, alle 24 slots", () => {
+  const groups = [{ count: 300, panel: JA430, azimuth: 180, minPerString: 5, maxPerString: 26 }];
+  const strings = allocateGroupsToMppts(groups, 3 * GW_SDT40.nMppt, 2);
+  assert.equal(strings.length, 24);
+  assert.equal(strings.reduce((s, x) => s + x.n, 0), 300);
+  const result = autoAssignFleet(strings, [{ inverter: GW_SDT40 }, { inverter: GW_SDT40 }, { inverter: GW_SDT40 }]);
+  assert.equal(result.overflow, false);
+  for (const u of result.units) {
+    assert.equal(u.flat().reduce((s, i) => s + strings[i].n, 0), 100);
+    for (const m of u) assert.equal(new Set(m.map((i) => strings[i].n)).size, 1);
+  }
+});
+
+test("allocateGroupsToMppts: 10 omvormers — alle 10 krijgen panelen, verschil per omvormer ≤ 1 string", () => {
+  const GW25 = { id: "GW25K-SDT-30", vmax: 1100, vmpptMin: 140, vmpptMax: 1000, imppt: 40, isc: 50, nMppt: 3, stringsPerMppt: 2, pmax: 45000, pacNom: 25000, iacMax: 38 };
+  const groups = [{ count: 245, panel: JA430, azimuth: 180, minPerString: 5, maxPerString: 26 }];
+  const strings = allocateGroupsToMppts(groups, 10 * GW25.nMppt, 2);
+  const units = Array.from({ length: 10 }, () => ({ inverter: GW25 }));
+  const result = autoAssignFleet(strings, units);
+  assert.equal(result.overflow, false);
+  const perUnit = result.units.map((u) => u.flat().reduce((s, i) => s + strings[i].n, 0));
+  assert.ok(perUnit.every((p) => p > 0), `alle omvormers gevuld, kreeg ${perUnit}`);
+  assert.ok(Math.max(...perUnit) - Math.min(...perUnit) <= 5, `max. één string (5) verschil, kreeg ${perUnit}`);
+});
+
+test("allocateGroupsToMppts: twee dakvlakken krijgen elk eigen MPPT's, lengtes per dakvlak ≤1 verschil", () => {
+  const groups = [
+    { count: 40, panel: JA430, azimuth: 90, minPerString: 5, maxPerString: 26 },
+    { count: 37, panel: JA430, azimuth: 270, minPerString: 5, maxPerString: 26 },
+  ];
+  const strings = allocateGroupsToMppts(groups, 4, 2);
+  const east = strings.filter((s) => s.azimuth === 90).map((s) => s.n);
+  const west = strings.filter((s) => s.azimuth === 270).map((s) => s.n);
+  assert.equal(east.reduce((a, b) => a + b, 0), 40);
+  assert.equal(west.reduce((a, b) => a + b, 0), 37);
+  assert.ok(Math.max(...east) - Math.min(...east) <= 1);
+  assert.ok(Math.max(...west) - Math.min(...west) <= 1);
+  assert.equal(autoAssignFleet(strings, [{ inverter: GW_SDT40 }]).overflow, false);
+});
+
+// --- Hoofdaansluiting bij omvormervoorstel ----------------------------------
+
+test("findMatchingInverters: met connAmps → totalIacMax/fitsConn, passende voorstellen bovenaan", () => {
+  // 200 panelen: GW40K (60,6 A) is GoodWe maar past niet op 3×50 A; de
+  // SUN100 (160,4 A) ook niet. Op 3×200 A passen beide.
+  const tight = findMatchingInverters({ panel: JA430, totalPanels: 200, tMinCold: -10, tMaxHot: 70, inverters: [SUN100, GW_SDT40, T20], connAmps: 50 });
+  for (const r of tight) assert.equal(r.totalIacMax, r.inverter.iacMax * r.invCount);
+  const firstNonFit = tight.findIndex((r) => !r.fitsConn);
+  if (firstNonFit !== -1) assert.ok(tight.slice(firstNonFit).every((r) => !r.fitsConn), "alle passende voorstellen staan vóór de niet-passende");
+  assert.equal(tight.find((r) => r.inverter.id === SUN100.id).fitsConn, false);
+  const roomy = findMatchingInverters({ panel: JA430, totalPanels: 200, tMinCold: -10, tMaxHot: 70, inverters: [SUN100, GW_SDT40], connAmps: 200 });
+  assert.ok(roomy.every((r) => r.fitsConn));
+  // Zonder connAmps: gedrag ongewijzigd (alles fitsConn, GoodWe bovenaan).
+  const none = findMatchingInverters({ panel: JA430, totalPanels: 200, tMinCold: -10, tMaxHot: 70, inverters: [SUN100, GW_SDT40] });
+  assert.equal(none[0].inverter.isGoodwe, true);
+});
+
+test("maxPhaseCurrent: 1-fase omvormers worden over 3 fasen gespreid, 3-fase telt op elke fase", () => {
+  const DNS = { id: "GW6000-DNS-30", family: "GoodWe DNS G3 (1-fase)", iacMax: 28.8 };
+  assert.equal(inverterPhases(DNS), 1);
+  assert.equal(inverterPhases(GW_SDT40), 3, "onbekende familie → 3-fase (conservatief)");
+  // 4× 1-fase op 3-fase aansluiting: zwaarste fase krijgt er 2.
+  assert.ok(Math.abs(maxPhaseCurrent(Array(4).fill(DNS), 3) - 57.6) < 1e-9);
+  // Op een 1-fase aansluiting komt alles op één fase.
+  assert.ok(Math.abs(maxPhaseCurrent(Array(2).fill(DNS), 1) - 57.6) < 1e-9);
+  // 3-fase: gewoon optellen per fase.
+  assert.ok(Math.abs(maxPhaseCurrent([GW_SDT40, GW_SDT40], 3) - 121.2) < 1e-9);
+  // Mix: 3-fase GW40K + 1× 1-fase → 60,6 + 28,8 op één fase.
+  assert.ok(Math.abs(maxPhaseCurrent([GW_SDT40, DNS], 3) - 89.4) < 1e-9);
 });
