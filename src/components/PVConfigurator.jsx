@@ -9,6 +9,7 @@ import {
   inverterFitsConnection,
   maxPhaseCurrent,
   findMatchingInverters,
+  findMatchingInvertersForFaces,
   autoAssign,
   autoAssignFleet,
   checkLegplan,
@@ -275,6 +276,7 @@ export default function PVConfigurator() {
   // uit de rekenkern, hier aanpasbaar per ontwerp.
   const [azimuthTolerance, setAzimuthTolerance] = useState(DEFAULT_AZIMUTH_TOLERANCE);
   const [tiltTolerance, setTiltTolerance] = useState(DEFAULT_TILT_TOLERANCE);
+  const toleranceSettings = { azimuthTol: Number(azimuthTolerance) || 0, tiltTol: Number(tiltTolerance) || 0 };
 
   // AC-kabel meterkast → omvormer(s): aderdikte-check op basis van de
   // opgetelde uitgangsstroom van het omvormerpark (totalIacMax).
@@ -405,6 +407,13 @@ export default function PVConfigurator() {
     setRoofMatches(null);
   }, [designStrings]);
 
+  // Voorstellen bevatten een concrete stringverdeling die van deze
+  // instellingen afhangt — bij wijziging opnieuw laten genereren i.p.v. een
+  // verouderd voorstel te kunnen toepassen.
+  useEffect(() => {
+    setRoofMatches(null);
+  }, [azimuthTolerance, tiltTolerance, connId, tMinCold, tMaxHot, roofPanelId]);
+
   // Vloot uitklappen tot individuele, doorlopend genummerde eenheden — mag
   // meerdere typen mixen (bijv. 3× GW40K + 1× GW33K wordt eenheid 1-3-4).
   const designUnits = useMemo(() => {
@@ -435,7 +444,7 @@ export default function PVConfigurator() {
       );
       return { units, overflow: false };
     }
-    return autoAssignFleet(designStringsResolved, designUnits, { azimuthTol: azimuthTolerance, tiltTol: tiltTolerance });
+    return autoAssignFleet(designStringsResolved, designUnits, toleranceSettings);
   }, [designAssignMode, manualStringsResolved, designStringsResolved, designUnits, azimuthTolerance, tiltTolerance]);
 
   // checkLegplan blijft ongewijzigd, gewoon één keer per eenheid aangeroepen —
@@ -787,24 +796,20 @@ export default function PVConfigurator() {
   // omvormertype — hergebruikt findMatchingInverters ongewijzigd (bekijkt het
   // totaal aantal panelen, niet de dakvlak-indeling zelf).
   function generateRoofSuggestion() {
+    setRoofImportError(null);
     const panel = availPanels.find((p) => p.id === roofPanelId) || availPanels[0];
-    const totalPanels = roofFaces.reduce((s, f) => s + (+f.count || 0), 0);
+    const faces = roofFaces.map((f) => ({ count: +f.count || 0, azimuth: +f.azimuth || 0, helling: +f.helling || 0 }));
     const fixedInvCount = roofFixedInvCount ? Math.max(1, +roofFixedInvCount) : undefined;
-    setRoofMatches(findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters: availInverters, fixedInvCount, connAmps: conn.amps, connPhases: conn.phases }));
+    setRoofMatches(
+      findMatchingInvertersForFaces({ panel, faces, tMinCold, tMaxHot, inverters: availInverters, fixedInvCount, connAmps: conn.amps, connPhases: conn.phases, tolerances: toleranceSettings })
+    );
   }
 
+  // Het voorstel bevat de verdeling al (findMatchingInvertersForFaces heeft
+  // hem berekend om te bepalen óf het voorstel past) — die gewoon overnemen,
+  // zodat wat getoond wordt en wat toegepast wordt nooit uiteen kan lopen.
   function applyRoofSuggestion(match) {
-    const panel = availPanels.find((p) => p.id === roofPanelId) || availPanels[0];
-    const minPerString = stringLengthRange(panel, match.inverter, tMinCold, tMaxHot)?.min ?? 1;
-    const groups = roofFaces
-      .filter((f) => (+f.count || 0) > 0)
-      .map((f) => ({ count: +f.count, panelId: roofPanelId, azimuth: f.azimuth, helling: f.helling, minPerString, maxPerString: match.nPerString }));
-    const strings = allocateGroupsToMppts(groups, match.inverter.nMppt * match.invCount, minMpptCapacity(match.inverter));
-    if (!strings) {
-      setRoofImportError(`Te veel panelen voor de beschikbare MPPT-capaciteit van ${match.inverter.id} (×${match.invCount}) — voorstel niet toegepast.`);
-      return;
-    }
-    setDesignStrings(strings);
+    setDesignStrings(match.strings.map(({ n, panelId, azimuth, helling }) => ({ n, panelId, azimuth, helling })));
     setDesignFleet([{ inverterId: match.inverter.id, count: match.invCount }]);
     setDesignManualStrings([]);
     setDesignAssignMode("auto");
@@ -852,7 +857,7 @@ export default function PVConfigurator() {
       return;
     }
 
-    const newStrings = allocateGroupsToMppts(groupsWithMax, inverter.nMppt * row.count, minMpptCapacity(inverter));
+    const newStrings = allocateGroupsToMppts(groupsWithMax, inverter.nMppt * row.count, minMpptCapacity(inverter), toleranceSettings);
     if (!newStrings) {
       setRecomputeError(`Te veel panelen voor de beschikbare MPPT-capaciteit van ${inverter.id} (×${row.count}) — strings niet aangepast.`);
       return;
@@ -1388,6 +1393,27 @@ export default function PVConfigurator() {
     </button>
   );
 
+  // Marges waarbinnen strings van verschillende dakvlakken samen op één MPPT
+  // mogen. Zelfde state in Invoer (stringverdeling bij "Toepassen") en
+  // Indeling (MPPT-toewijzing); toleranceSettings staat bij de state.
+  const renderToleranceInputs = () => (
+    <>
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <div>
+          <div style={label}>Max azimuthverschil (°)</div>
+          <input type="number" min={0} max={180} value={azimuthTolerance} onChange={(e) => setAzimuthTolerance(e.target.value === "" ? "" : Number(e.target.value))} style={{ width: 70 }} />
+        </div>
+        <div>
+          <div style={label}>Max hellingverschil (°)</div>
+          <input type="number" min={0} max={90} value={tiltTolerance} onChange={(e) => setTiltTolerance(e.target.value === "" ? "" : Number(e.target.value))} style={{ width: 70 }} />
+        </div>
+      </div>
+      <div style={{ fontSize: 11, ...muted, marginTop: 6 }}>
+        Strings binnen deze marges mogen samen op één MPPT — bijv. twee dakvlakken die allebei vrijwel zuid zijn. Paneeltype en aantal panelen moeten altijd exact gelijk zijn, ongeacht deze marges.
+      </div>
+    </>
+  );
+
   // Grote, onmiskenbare waarschuwing wanneer de opgetelde max. uitgangsstroom
   // van de omvormers boven de hoofdaansluiting (A per fase) uitkomt — gebruikt
   // bij de voorstellen, in de Indeling en in het Resultaat.
@@ -1764,6 +1790,11 @@ export default function PVConfigurator() {
                   ))}
                 </div>
 
+                <div style={{ marginBottom: 12, padding: "10px 12px", borderRadius: "var(--border-radius-md)", background: "var(--color-background-secondary)" }}>
+                  <div style={{ fontSize: 12, fontWeight: 500, marginBottom: 6 }}>Marge voor samen op één MPPT</div>
+                  {renderToleranceInputs()}
+                </div>
+
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
                   <button onClick={addRoofFace} style={{ fontSize: 12, padding: "5px 10px", border: "0.5px solid var(--color-border-secondary)", borderRadius: "var(--border-radius-md)", background: "transparent", cursor: "pointer", color: "var(--color-text-primary)" }}>
                     <i className="ti ti-plus" style={{ fontSize: 13, verticalAlign: -2, marginRight: 4 }} /> Dakvlak toevoegen
@@ -1808,7 +1839,7 @@ export default function PVConfigurator() {
                             {i === 0 && <span style={{ background: "var(--color-background-info)", color: "var(--color-text-info)", fontSize: 12, padding: "3px 10px", borderRadius: "var(--border-radius-md)" }}>Beste match</span>}
                           </div>
                           <div style={{ fontSize: 13, marginTop: 8 }}>
-                            {m.invCount * m.inverter.nMppt} MPPT's · strings van max. {m.nPerString} panelen, gelijk verdeeld · {(m.totalWp / 1000).toFixed(1)} kWp op {(m.totalAc / 1000).toFixed(1)} kW AC
+                            {m.strings.length} strings op {m.invCount * m.inverter.nMppt} MPPT's ({m.strings.map((x) => x.n).join(" · ")} panelen) · {(m.totalWp / 1000).toFixed(1)} kWp op {(m.totalAc / 1000).toFixed(1)} kW AC
                           </div>
                           <div style={{ fontSize: 13, marginTop: 4 }}>
                             <span style={muted}>Overdimensionering: </span>
@@ -1969,20 +2000,8 @@ export default function PVConfigurator() {
                   </div>
                   <div style={{ fontSize: 12, ...muted, marginTop: 6 }}>Automatisch houdt zelfde oriëntatie op zelfde MPPT en verdeelt de strings gelijkmatig over alle eenheden (naar verhouding van hun AC-vermogen). Bij een mix van typen: gebruik Handmatig om per MPPT-slot zelf paneeltype en aantal in te vullen.</div>
                   {designAssignMode === "auto" && (
-                    <div style={{ display: "flex", gap: 16, marginTop: 10, paddingTop: 10, borderTop: "0.5px solid var(--color-border-tertiary)" }}>
-                      <div>
-                        <div style={label}>Max azimuthverschil (°)</div>
-                        <input type="number" min={0} max={180} value={azimuthTolerance} onChange={(e) => setAzimuthTolerance(e.target.value === "" ? "" : Number(e.target.value))} style={{ width: 70 }} />
-                      </div>
-                      <div>
-                        <div style={label}>Max hellingverschil (°)</div>
-                        <input type="number" min={0} max={90} value={tiltTolerance} onChange={(e) => setTiltTolerance(e.target.value === "" ? "" : Number(e.target.value))} style={{ width: 70 }} />
-                      </div>
-                    </div>
+                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: "0.5px solid var(--color-border-tertiary)" }}>{renderToleranceInputs()}</div>
                   )}
-                  <div style={{ fontSize: 11, ...muted, marginTop: 6 }}>
-                    Strings binnen deze marges mogen samen op één MPPT — bijv. twee dakvlakken die allebei vrijwel zuid zijn. Paneeltype en aantal panelen moeten altijd exact gelijk zijn, ongeacht deze marges.
-                  </div>
                 </div>
               </div>
 

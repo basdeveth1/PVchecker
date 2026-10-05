@@ -28,6 +28,8 @@ import {
   splitIntoEqualMpptStrings,
   splitGroupOverMppts,
   allocateGroupsToMppts,
+  splitClusterIntoStrings,
+  findMatchingInvertersForFaces,
   stringLengthRange,
   maxPhaseCurrent,
   inverterPhases,
@@ -705,4 +707,95 @@ test("maxPhaseCurrent: 1-fase omvormers worden over 3 fasen gespreid, 3-fase tel
   assert.ok(Math.abs(maxPhaseCurrent([GW_SDT40, GW_SDT40], 3) - 121.2) < 1e-9);
   // Mix: 3-fase GW40K + 1× 1-fase → 60,6 + 28,8 op één fase.
   assert.ok(Math.abs(maxPhaseCurrent([GW_SDT40, DNS], 3) - 89.4) < 1e-9);
+});
+
+// --- Marge bij stringverdeling: dakvlakken binnen tolerantie delen MPPT's ----
+// Verzoek 2026-10-02: twee strings die 10° verschillen moeten bij een marge
+// van 15° al bij "Toepassen" van een voorstel samen op één MPPT kunnen.
+
+test("allocateGroupsToMppts: 2 dakvlakken 10° uit elkaar, marge 15° → strings delen een MPPT", () => {
+  const groups = [
+    { count: 19, panelId: JA430.id, panel: JA430, azimuth: 180, helling: 10, minPerString: 5, maxPerString: 20 },
+    { count: 19, panelId: JA430.id, panel: JA430, azimuth: 190, helling: 10, minPerString: 5, maxPerString: 20 },
+  ];
+  const tol = { azimuthTol: 15, tiltTol: 10 };
+  const strings = allocateGroupsToMppts(groups, 4, 2, tol);
+  assert.equal(strings.filter((s) => s.azimuth === 180).reduce((a, s) => a + s.n, 0), 19, "elk vlak houdt z'n eigen panelen");
+  assert.equal(strings.filter((s) => s.azimuth === 190).reduce((a, s) => a + s.n, 0), 19);
+  const result = autoAssignFleet(strings, [{ inverter: GW_SDT40 }], tol);
+  assert.equal(result.overflow, false);
+  const mixed = result.units[0].some((m) => new Set(m.map((i) => strings[i].azimuth)).size > 1);
+  assert.ok(mixed, "minstens één MPPT met strings van beide dakvlakken");
+  for (const m of result.units[0]) assert.ok(new Set(m.map((i) => strings[i].n)).size <= 1, "parallelle strings gelijk");
+});
+
+test("allocateGroupsToMppts: zelfde 2 dakvlakken, marge 5° → nooit samen op één MPPT", () => {
+  const groups = [
+    { count: 19, panelId: JA430.id, panel: JA430, azimuth: 180, helling: 10, minPerString: 5, maxPerString: 20 },
+    { count: 19, panelId: JA430.id, panel: JA430, azimuth: 190, helling: 10, minPerString: 5, maxPerString: 20 },
+  ];
+  const tol = { azimuthTol: 5, tiltTol: 10 };
+  const strings = allocateGroupsToMppts(groups, 4, 2, tol);
+  const result = autoAssignFleet(strings, [{ inverter: GW_SDT40 }], tol);
+  for (const m of result.units[0]) assert.ok(new Set(m.map((i) => strings[i].azimuth)).size <= 1);
+});
+
+test("allocateGroupsToMppts: marge laat 2 kleine vlakken passen waar ze los niet passen", () => {
+  // 1 MPPT × 2 strings: los heeft elk vlak een eigen MPPT nodig (2 > 1),
+  // binnen de marge kunnen ze samen als 2× 15 parallel.
+  const groups = [
+    { count: 15, panelId: JA430.id, panel: JA430, azimuth: 175, helling: 10, minPerString: 8, maxPerString: 20 },
+    { count: 15, panelId: JA430.id, panel: JA430, azimuth: 185, helling: 10, minPerString: 8, maxPerString: 20 },
+  ];
+  assert.equal(allocateGroupsToMppts(groups, 1, 2, { azimuthTol: 5, tiltTol: 10 }), null);
+  const strings = allocateGroupsToMppts(groups, 1, 2, { azimuthTol: 15, tiltTol: 10 });
+  assert.deepEqual(strings.map((s) => s.n), [15, 15]);
+});
+
+test("splitClusterIntoStrings: ander paneelaantal per vlak → lengtes afgestemd zodat ze in de MPPT's passen", () => {
+  const res = splitClusterIntoStrings([40, 37], 4, 2, 5, 26);
+  assert.equal(res[0].reduce((a, b) => a + b, 0), 40);
+  assert.equal(res[1].reduce((a, b) => a + b, 0), 37);
+  const byLen = new Map();
+  for (const n of res.flat()) byLen.set(n, (byLen.get(n) || 0) + 1);
+  assert.ok([...byLen.values()].reduce((a, k) => a + Math.ceil(k / 2), 0) <= 4);
+});
+
+// --- Voorstel moet altijd toepasbaar zijn (2026-10-05) ----------------------
+// Referentiecase: Bas kreeg 2× GW10K-SDT-30 als "Beste match" en bij
+// Toepassen tegelijk "Te veel panelen voor de MPPT-capaciteit". Oorzaak:
+// het voorstel keek alleen naar het totaal (65 ≤ 4 strings × 24), terwijl
+// de verdeling per dakvlak 5 strings nodig had op 4 MPPT's (1 string/MPPT).
+const JA460LR = { id: "JAM54D41-460/LR", wp: 460, imp: 13.66, isc: 14.43, vmp: 33.68, voc: 40.6, betaVoc: -0.25 };
+const GW10K = { id: "GW10K-SDT-30", family: "GoodWe SDT G3 (3-fase)", vmax: 1100, vmpptMin: 140, vmpptMax: 1000, imppt: 22, isc: 27.5, nMppt: 2, stringsPerMppt: 1, pmax: 15000, pacNom: 10000, iacMax: 16.7, isGoodwe: true };
+const FACES_1005 = [
+  { count: 17, azimuth: 141, helling: 10 },
+  { count: 8, azimuth: 143, helling: 10 },
+  { count: 29, azimuth: 232, helling: 10 },
+  { count: 11, azimuth: 231, helling: 10 },
+];
+
+test("findMatchingInvertersForFaces: elk voorstel past echt — strings in de MPPT's, alle panelen verdeeld", () => {
+  const tol = { azimuthTol: 20, tiltTol: 10 };
+  const res = findMatchingInvertersForFaces({ panel: JA460LR, faces: FACES_1005, tMinCold: -10, tMaxHot: 70, inverters: [GW10K, T20, GW_SDT40], connAmps: 35, tolerances: tol });
+  assert.ok(res.length > 0);
+  for (const m of res) {
+    assert.equal(m.strings.reduce((a, x) => a + x.n, 0), 65, `${m.inverter.id}: alle 65 panelen`);
+    const units = Array.from({ length: m.invCount }, () => ({ inverter: m.inverter }));
+    const a = autoAssignFleet(m.strings.map((x) => ({ ...x, panel: JA460LR })), units, tol);
+    assert.equal(a.overflow, false, `${m.inverter.id} ×${m.invCount} moet passen`);
+  }
+});
+
+test("findMatchingInvertersForFaces: referentiecase 2× GW10K — vlakken binnen marge samen gestringd", () => {
+  const res = findMatchingInvertersForFaces({ panel: JA460LR, faces: FACES_1005, tMinCold: -10, tMaxHot: 70, inverters: [GW10K], connAmps: 35, tolerances: { azimuthTol: 20, tiltTol: 10 } });
+  assert.equal(res[0].invCount, 2);
+  assert.deepEqual(res[0].strings.map((x) => x.n).sort((a, b) => b - a), [20, 20, 13, 12]);
+});
+
+test("findMatchingInvertersForFaces: zonder marge past 2× GW10K niet → meer omvormers of geen GW10K-voorstel", () => {
+  const res = findMatchingInvertersForFaces({ panel: JA460LR, faces: FACES_1005, tMinCold: -10, tMaxHot: 70, inverters: [GW10K], tolerances: { azimuthTol: 0, tiltTol: 0 } });
+  for (const m of res) assert.ok(m.invCount >= 3, "met 4 losse vlakken zijn minstens 5 MPPT's nodig");
+  const fixed = findMatchingInvertersForFaces({ panel: JA460LR, faces: FACES_1005, tMinCold: -10, tMaxHot: 70, inverters: [GW10K], fixedInvCount: 2, tolerances: { azimuthTol: 0, tiltTol: 0 } });
+  assert.equal(fixed.length, 0, "vast aantal 2 kan niet → geen voorstel i.p.v. een onuitvoerbaar voorstel");
 });

@@ -344,13 +344,45 @@ export function splitGroupOverMppts(count, mppts, cap, minPerString, maxPerStrin
 // (zolang die groep er nog een string van ≥ minPerString op kwijt kan).
 // Binnen een groep doet splitGroupOverMppts de gelijke verdeling. Geeft een
 // platte strings-lijst ({ ...rest, n }), of null als het niet past.
-export function allocateGroupsToMppts(groups, totalMppts, cap) {
+//
+// `tolerances` ({ azimuthTol, tiltTol }, zie canShareMppt): dakvlakken met
+// hetzelfde paneeltype waarvan oriëntatie/helling binnen de marge liggen,
+// vormen samen één cluster dat MPPT's deelt (bijv. twee "vrijwel zuid"-vlakken
+// die 10° verschillen bij een marge van 15°). Elk dakvlak houdt z'n eigen
+// strings (met eigen azimuth/helling), maar de stringlengtes worden over het
+// hele cluster op elkaar afgestemd, zodat strings van verschillende vlakken
+// parallel op één MPPT kunnen. Lukt dat niet binnen de MPPT's, of geeft het
+// een duidelijk ongelijkere verdeling (>1 paneel verschil) dan wanneer de
+// strings over de vlakken heen mogen lopen, dan worden de panelen van het
+// cluster samen gestringd: binnen de marge gelden ze als één oriëntatie,
+// en zo'n string krijgt de (naar paneelaantal gewogen) gemiddelde
+// azimuth/helling van het cluster.
+export function allocateGroupsToMppts(groups, totalMppts, cap, tolerances = {}) {
   if (groups.length === 0) return [];
-  const minOf = (g) => g.minPerString ?? 1;
+  const clusters = clusterGroupsWithinTolerance(groups, tolerances);
+  const minOf = (cl) => Math.max(...cl.map((g) => g.minPerString ?? 1));
+  const maxOf = (cl) => Math.min(...cl.map((g) => g.maxPerString));
+  const countOf = (cl) => cl.reduce((s, g) => s + g.count, 0);
+  const perFace = (cl, mppts) => splitClusterIntoStrings(cl.map((g) => g.count), mppts, cap, minOf(cl), maxOf(cl));
+  const pooled = (cl, mppts) => (cl.length > 1 ? splitClusterIntoStrings([countOf(cl)], mppts, cap, minOf(cl), maxOf(cl)) : null);
+  const spread = (lists) => {
+    const all = lists.flat();
+    return Math.max(...all) - Math.min(...all);
+  };
+  // Keuze per cluster bij een gegeven aantal MPPT's: eigen strings per vlak
+  // als dat gelijkmatig kan, anders samen gestringd, anders per vlak.
+  const plan = (cl, mppts) => {
+    const pf = perFace(cl, mppts);
+    if (pf && spread(pf) <= 1) return { perFace: pf };
+    const pl = pooled(cl, mppts);
+    if (pl) return { pooled: pl[0] };
+    return pf ? { perFace: pf } : null;
+  };
+
   const m = [];
-  for (const g of groups) {
-    let need = Math.max(1, Math.ceil(g.count / (cap * g.maxPerString)));
-    while (need <= totalMppts && !splitGroupOverMppts(g.count, need, cap, minOf(g), g.maxPerString)) need++;
+  for (const cl of clusters) {
+    let need = Math.max(1, Math.ceil(countOf(cl) / (cap * maxOf(cl))));
+    while (need <= totalMppts && !plan(cl, need)) need++;
     m.push(need);
   }
   let extra = totalMppts - m.reduce((a, b) => a + b, 0);
@@ -358,9 +390,9 @@ export function allocateGroupsToMppts(groups, totalMppts, cap) {
   while (extra > 0) {
     let best = -1;
     let bestAvg = -Infinity;
-    groups.forEach((g, i) => {
-      if (g.count / (m[i] + 1) < minOf(g)) return;
-      const avg = g.count / m[i];
+    clusters.forEach((cl, i) => {
+      if (countOf(cl) / (m[i] + 1) < minOf(cl)) return;
+      const avg = countOf(cl) / m[i];
       if (avg > bestAvg) {
         bestAvg = avg;
         best = i;
@@ -370,11 +402,98 @@ export function allocateGroupsToMppts(groups, totalMppts, cap) {
     m[best]++;
     extra--;
   }
-  return groups.flatMap((g, i) => {
-    const { count, minPerString, maxPerString, ...rest } = g;
-    const perMppt = splitGroupOverMppts(count, m[i], cap, minOf(g), maxPerString);
-    return perMppt.flat().map((n) => ({ ...rest, n }));
+  const result = [];
+  clusters.forEach((cl, i) => {
+    const p = plan(cl, m[i]);
+    if (p.perFace) {
+      cl.forEach((g, f) => {
+        const { count, minPerString, maxPerString, ...rest } = g;
+        for (const n of p.perFace[f]) result.push({ ...rest, n });
+      });
+    } else {
+      const { count, minPerString, maxPerString, ...rest } = cl[0];
+      const orientation = weightedOrientation(cl);
+      for (const n of p.pooled) result.push({ ...rest, ...orientation, n });
+    }
   });
+  return result;
+}
+
+// Naar paneelaantal gewogen gemiddelde oriëntatie van een cluster (azimuth
+// als hoek, dus met 360°-wrap: 350° en 10° middelen naar 0°, niet 180°).
+function weightedOrientation(cl) {
+  let x = 0;
+  let y = 0;
+  let tilt = 0;
+  let total = 0;
+  for (const g of cl) {
+    const rad = (g.azimuth * Math.PI) / 180;
+    x += g.count * Math.cos(rad);
+    y += g.count * Math.sin(rad);
+    tilt += g.count * (g.helling ?? 0);
+    total += g.count;
+  }
+  const az = Math.round(((Math.atan2(y, x) * 180) / Math.PI + 360) % 360) % 360;
+  return { azimuth: az, helling: Math.round(tilt / total) };
+}
+
+// Groepeert dakvlakken die samen op MPPT's mogen: zelfde paneeltype en
+// onderling (elk paar) oriëntatie/helling binnen de marge. Deterministisch:
+// grootste dakvlak eerst, elk vlak in het eerste cluster waar het past.
+function clusterGroupsWithinTolerance(groups, tolerances) {
+  const azimuthTol = tolerances.azimuthTol ?? DEFAULT_AZIMUTH_TOLERANCE;
+  const tiltTol = tolerances.tiltTol ?? DEFAULT_TILT_TOLERANCE;
+  const fits = (a, b) =>
+    (a.panelId ?? a.panel?.id) === (b.panelId ?? b.panel?.id) &&
+    azimuthDiff(a.azimuth, b.azimuth) <= azimuthTol &&
+    Math.abs((a.helling ?? 0) - (b.helling ?? 0)) <= tiltTol;
+  const order = groups.map((g, i) => i).sort((a, b) => groups[b].count - groups[a].count || a - b);
+  const clusters = [];
+  for (const i of order) {
+    const target = clusters.find((cl) => cl.every((g) => fits(g, groups[i])));
+    if (target) target.push(groups[i]);
+    else clusters.push([groups[i]]);
+  }
+  return clusters;
+}
+
+// Verdeelt de dakvlakken van één cluster (paneelaantallen `faceCounts`) over
+// maximaal `mppts` MPPT's met `cap` strings: per dakvlak een aantal strings
+// naar rato van z'n paneelaantal, binnen een dakvlak lengtes ≤1 verschil.
+// Geldig als de strings, gegroepeerd per lengte, in `mppts` MPPT's passen
+// (parallelle strings moeten exact even lang zijn — welk dakvlak ze komen
+// maakt binnen het cluster niet uit). Kiest het grootste totaal aantal
+// strings dat past. Geeft per dakvlak de lijst stringlengtes, of null.
+export function splitClusterIntoStrings(faceCounts, mppts, cap, minPerString, maxPerString) {
+  const total = faceCounts.reduce((a, b) => a + b, 0);
+  if (total <= 0 || maxPerString < minPerString || faceCounts.some((c) => c <= 0)) return null;
+  for (let S = mppts * cap; S >= faceCounts.length; S--) {
+    const lo = faceCounts.map((c) => Math.ceil(c / maxPerString));
+    const hi = faceCounts.map((c) => Math.floor(c / minPerString));
+    if (lo.some((l, f) => l > hi[f])) return null;
+    if (lo.reduce((a, b) => a + b, 0) > S || hi.reduce((a, b) => a + b, 0) < S) continue;
+    // Grootste-rest-verdeling van S over de dakvlakken, binnen [lo, hi].
+    const ideal = faceCounts.map((c) => (c / total) * S);
+    const s = ideal.map((x, f) => Math.min(hi[f], Math.max(lo[f], Math.floor(x))));
+    let diff = S - s.reduce((a, b) => a + b, 0);
+    const byRemainder = ideal.map((x, f) => f).sort((a, b) => ideal[b] - s[b] - (ideal[a] - s[a]) || a - b);
+    while (diff !== 0) {
+      let moved = false;
+      for (const f of diff > 0 ? byRemainder : [...byRemainder].reverse()) {
+        if (diff > 0 && s[f] < hi[f]) { s[f]++; diff--; moved = true; break; }
+        if (diff < 0 && s[f] > lo[f]) { s[f]--; diff++; moved = true; break; }
+      }
+      if (!moved) break;
+    }
+    if (diff !== 0) continue;
+    const perFace = faceCounts.map((c, f) => distributeCounts(c, s[f]));
+    const byLength = new Map();
+    for (const len of perFace.flat()) byLength.set(len, (byLength.get(len) || 0) + 1);
+    let needed = 0;
+    for (const k of byLength.values()) needed += Math.ceil(k / cap);
+    if (needed <= mppts) return perFace;
+  }
+  return null;
 }
 
 // ----------------------------------------------------------------------------
@@ -524,15 +643,51 @@ export function findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, i
     if (best) results.push({ inverter: inv, ...best });
   }
 
-  // Past op aansluiting → GoodWe bovenaan → in-band → minste omvormers →
-  // dichtst bij 135%.
-  results.sort((a, b) => {
-    if (a.fitsConn !== b.fitsConn) return a.fitsConn ? -1 : 1;
-    if (!!a.inverter.isGoodwe !== !!b.inverter.isGoodwe) return a.inverter.isGoodwe ? -1 : 1;
-    if (a.inBand !== b.inBand) return a.inBand ? -1 : 1;
-    if (a.invCount !== b.invCount) return a.invCount - b.invCount;
-    return Math.abs(a.dcAcRatio - 1.35) - Math.abs(b.dcAcRatio - 1.35);
-  });
+  results.sort(compareMatches);
+  return results;
+}
+
+// Past op aansluiting → GoodWe bovenaan → in-band → minste omvormers →
+// dichtst bij 135%.
+function compareMatches(a, b) {
+  if (a.fitsConn !== b.fitsConn) return a.fitsConn ? -1 : 1;
+  if (!!a.inverter.isGoodwe !== !!b.inverter.isGoodwe) return a.inverter.isGoodwe ? -1 : 1;
+  if (a.inBand !== b.inBand) return a.inBand ? -1 : 1;
+  if (a.invCount !== b.invCount) return a.invCount - b.invCount;
+  return Math.abs(a.dcAcRatio - 1.35) - Math.abs(b.dcAcRatio - 1.35);
+}
+
+// Zoals findMatchingInverters, maar met de echte dakvlak-indeling: elk
+// voorstel wordt ook daadwerkelijk over de MPPT's verdeeld
+// (allocateGroupsToMppts, met marges en min./max. stringlengte). Alleen
+// voorstellen die zo passen komen terug — een voorstel dat bij "Toepassen"
+// toch niet past, mag nooit verschijnen. findMatchingInverters kijkt alleen
+// naar het totaal aantal panelen; met losse dakvlakken zijn soms meer strings
+// (en dus MPPT's) nodig, dan wordt eerst 1-2 omvormers meer geprobeerd
+// (behalve bij een vast opgegeven aantal). Elk resultaat bevat `strings`:
+// de verdeling die "Toepassen" overneemt.
+export function findMatchingInvertersForFaces({ panel, faces, tMinCold, tMaxHot, inverters, fixedInvCount, connAmps, connPhases = 3, tolerances = {} }) {
+  const usedFaces = faces.filter((f) => f.count > 0);
+  const totalPanels = usedFaces.reduce((sum, f) => sum + f.count, 0);
+  if (totalPanels === 0) return [];
+  const base = findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters, fixedInvCount, connAmps, connPhases });
+  const results = [];
+  for (const first of base) {
+    const inv = first.inverter;
+    const range = stringLengthRange(panel, inv, tMinCold, tMaxHot);
+    const counts = fixedInvCount ? [first.invCount] : [first.invCount, first.invCount + 1, first.invCount + 2];
+    for (const n of counts) {
+      const r = n === first.invCount ? first : findMatchingInverters({ panel, totalPanels, tMinCold, tMaxHot, inverters: [inv], fixedInvCount: n, connAmps, connPhases })[0];
+      if (!r) continue;
+      const groups = usedFaces.map((f) => ({ count: f.count, panelId: panel.id, azimuth: f.azimuth, helling: f.helling, minPerString: range?.min ?? 1, maxPerString: r.nPerString }));
+      const strings = allocateGroupsToMppts(groups, inv.nMppt * n, minMpptCapacity(inv), tolerances);
+      if (strings) {
+        results.push({ ...r, strings, stringsTotal: strings.length });
+        break;
+      }
+    }
+  }
+  results.sort(compareMatches);
   return results;
 }
 
