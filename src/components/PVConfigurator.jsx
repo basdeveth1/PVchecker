@@ -8,6 +8,7 @@ import {
   getConnection,
   inverterFitsConnection,
   maxPhaseCurrent,
+  inverterPhases,
   findMatchingInverters,
   findMatchingInvertersForFaces,
   autoAssign,
@@ -289,7 +290,6 @@ export default function PVConfigurator() {
   const [kabelInputMode, setKabelInputMode] = useState("manual"); // "manual" | "inverter"
   const [kabelManualCurrent, setKabelManualCurrent] = useState(25);
   const [kabelInverterId, setKabelInverterId] = useState("");
-  const [kabelInverterCount, setKabelInverterCount] = useState(1);
   const [kabelPhases, setKabelPhases] = useState(3);
   const [kabelLength, setKabelLength] = useState(15);
   const [kabelInstallMethod, setKabelInstallMethod] = useState("b1");
@@ -513,10 +513,26 @@ export default function PVConfigurator() {
   const totalIacMax = maxPhaseCurrent(designUnits.map((u) => u.inverter), conn.phases);
   const fleetFitsConn = designUnits.length === 0 || inverterFitsConnection(totalIacMax, conn.amps);
 
-  const cableResult = useMemo(() => {
-    if (totalIacMax <= 0 || !cableLength) return null;
-    return requiredCableCrossSection({ current: totalIacMax, length: cableLength, phases: conn.phases, installMethod: cableInstallMethod });
-  }, [totalIacMax, cableLength, cableInstallMethod, conn.phases]);
+  // Elke omvormer krijgt z'n eigen AC-kabel naar de meterkast/verdeelkast:
+  // dimensioneren op de iacMax van één omvormer, niet op de som van het park.
+  // Eén regel per omvormertype (bij een mix verschillen stroom en fasen).
+  const cableRowsFor = (units, length, installMethod) => {
+    const byType = new Map();
+    for (const u of units) {
+      if (!byType.has(u.inverter.id)) byType.set(u.inverter.id, { inverter: u.inverter, count: 0 });
+      byType.get(u.inverter.id).count++;
+    }
+    return [...byType.values()].map(({ inverter, count }) => {
+      const phases = conn.phases === 1 ? 1 : inverterPhases(inverter);
+      const current = inverter.iacMax;
+      const result = current > 0 && length ? requiredCableCrossSection({ current, length, phases, installMethod }) : null;
+      return { label: `${count > 1 ? `${count}× ` : ""}${inverter.id}`, current, phases, result };
+    });
+  };
+  const cableRows = useMemo(
+    () => cableRowsFor(designUnits, cableLength, cableInstallMethod),
+    [designUnits, cableLength, cableInstallMethod, conn.phases]
+  );
 
   // Losse "AC-kabel"-tab: stroom komt uit het huidige ontwerp (indien
   // aanwezig), een handmatig ingevoerde waarde, of een gekozen omvormer
@@ -527,12 +543,14 @@ export default function PVConfigurator() {
       ? totalIacMax
       : kabelInputMode === "manual"
       ? Number(kabelManualCurrent) || 0
-      : (kabelSelectedInverter?.iacMax || 0) * (Number(kabelInverterCount) || 0);
+      : kabelSelectedInverter?.iacMax || 0;
   const kabelPhasesEffective = kabelInputMode === "design" ? conn.phases : kabelPhases;
-  const kabelResult = useMemo(() => {
-    if (kabelCurrentA <= 0 || !kabelLength) return null;
-    return requiredCableCrossSection({ current: kabelCurrentA, length: kabelLength, phases: kabelPhasesEffective, installMethod: kabelInstallMethod });
-  }, [kabelCurrentA, kabelLength, kabelInstallMethod, kabelPhasesEffective]);
+  const kabelRows = useMemo(() => {
+    if (kabelInputMode === "design") return cableRowsFor(designUnits, kabelLength, kabelInstallMethod);
+    const result = kabelCurrentA > 0 && kabelLength ? requiredCableCrossSection({ current: kabelCurrentA, length: kabelLength, phases: kabelPhasesEffective, installMethod: kabelInstallMethod }) : null;
+    const label = kabelInputMode === "inverter" ? `${kabelSelectedInverter?.id} (per omvormer)` : null;
+    return [{ label, current: kabelCurrentA, phases: kabelPhasesEffective, result }];
+  }, [kabelInputMode, designUnits, kabelCurrentA, kabelLength, kabelInstallMethod, kabelPhasesEffective, kabelSelectedInverter, conn.phases]);
 
   // Rapport voor de monteur: label = omvormer.mppt.string, omvormer-cijfer =
   // het doorlopende eenheidsnummer uit designUnits, + Voc STC per string.
@@ -1430,7 +1448,7 @@ export default function PVConfigurator() {
   // Gedeeld door de AC-kabel-kaart in "Ontwerp checken" (Resultaat-stap) en
   // de losse "AC-kabel"-tab — alleen de stroom komt op een andere manier tot
   // stand, de lengte/legmethode/resultaat-UI is identiek.
-  const renderCableCheck = ({ length, setLength, installMethod, setInstallMethod, result }) => (
+  const renderCableCheck = ({ length, setLength, installMethod, setInstallMethod, rows }) => (
     <>
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 14 }}>
         <div>
@@ -1452,22 +1470,24 @@ export default function PVConfigurator() {
           </select>
         </div>
       </div>
-      {result ? (
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <i className="ti ti-circle-check" style={{ fontSize: 20, color: "var(--color-text-success)" }} aria-hidden="true" />
-          <div style={{ fontSize: 13 }}>
-            Minimaal <b>{result.crossSection} mm²</b> koper (PVC) — belastbaarheid {result.ampacity} A, spanningsval {result.voltageDropPct.toFixed(2)}% (norm ≤{VOLTAGE_DROP_MAX_PCT}%)
-            <span style={muted}> · maatgevend: {result.limitedBy}</span>
+      <div style={{ display: "grid", gap: 10 }}>
+        {rows.map((row, i) => (
+          <div key={i} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <i className={row.result ? "ti ti-circle-check" : "ti ti-x"} style={{ fontSize: 20, color: row.result ? "var(--color-text-success)" : "var(--color-text-danger)" }} aria-hidden="true" />
+            <div style={{ fontSize: 13, color: row.result ? undefined : "var(--color-text-danger)" }}>
+              {row.label && <div style={{ fontWeight: 500 }}>{row.label} <span style={{ ...muted, fontWeight: 400 }}>· {row.current.toFixed(1)} A · {row.phases}-fase</span></div>}
+              {row.result ? (
+                <>
+                  Minimaal <b>{row.result.crossSection} mm²</b> koper (PVC) — belastbaarheid {row.result.ampacity} A, spanningsval {row.result.voltageDropPct.toFixed(2)}% (norm ≤{VOLTAGE_DROP_MAX_PCT}%)
+                  <span style={muted}> · maatgevend: {row.result.limitedBy}</span>
+                </>
+              ) : (
+                <>Geen standaarddoorsnede tot {CABLE_CROSS_SECTIONS[CABLE_CROSS_SECTIONS.length - 1]} mm² voldoet bij deze stroom/lengte/legmethode — raadpleeg een elektrotechnisch adviseur.</>
+              )}
+            </div>
           </div>
-        </div>
-      ) : (
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <i className="ti ti-x" style={{ fontSize: 20, color: "var(--color-text-danger)" }} aria-hidden="true" />
-          <div style={{ fontSize: 13, color: "var(--color-text-danger)" }}>
-            Geen standaarddoorsnede tot {CABLE_CROSS_SECTIONS[CABLE_CROSS_SECTIONS.length - 1]} mm² voldoet bij deze stroom/lengte/legmethode — raadpleeg een elektrotechnisch adviseur.
-          </div>
-        </div>
-      )}
+        ))}
+      </div>
       <div style={{ fontSize: 11, ...muted, marginTop: 10 }}>
         Vereenvoudigde indicatie: koper, PVC-isolatie, 3%-spanningsvalnorm vast. Stroombelastbaarheid uit IEC 60364-5-52 (tabel B.52.4). Geen vervanging voor een volledige kabelberekening door een elektrotechnisch adviseur.
       </div>
@@ -2165,11 +2185,11 @@ export default function PVConfigurator() {
               </div>
 
               <div style={{ ...card, marginBottom: 20 }}>
-                <div style={{ fontWeight: 500, marginBottom: 12 }}>AC-kabel meterkast → omvormer(s)</div>
+                <div style={{ fontWeight: 500, marginBottom: 12 }}>AC-kabel meterkast → omvormer, per omvormer</div>
                 <div style={{ fontSize: 13, ...muted, marginBottom: 14 }}>
-                  Ontwerpstroom: {totalIacMax.toFixed(1)} A · {conn.phases}-fase (totale omvormer-uitgang)
+                  Elke omvormer z'n eigen kabel; ontwerpstroom = max. uitgangsstroom van één omvormer. Kabellengte = afstand per omvormer.
                 </div>
-                {renderCableCheck({ length: cableLength, setLength: setCableLength, installMethod: cableInstallMethod, setInstallMethod: setCableInstallMethod, result: cableResult })}
+                {renderCableCheck({ length: cableLength, setLength: setCableLength, installMethod: cableInstallMethod, setInstallMethod: setCableInstallMethod, rows: cableRows })}
               </div>
 
               {designFleetResults.map(({ unit, result }) => (
@@ -2375,7 +2395,11 @@ export default function PVConfigurator() {
             </div>
             {kabelInputMode === "design" ? (
               <div style={{ fontSize: 13 }}>
-                {totalIacMax.toFixed(1)} A · {conn.phases}-fase <span style={muted}>(totale omvormer-uitgang uit "Ontwerp checken")</span>
+                {designUnits.length === 0 ? (
+                  <span style={muted}>Nog geen omvormers in "Ontwerp checken".</span>
+                ) : (
+                  <span style={muted}>Per omvormer uit "Ontwerp checken" (elke omvormer z'n eigen kabel, max. uitgangsstroom van één omvormer).</span>
+                )}
               </div>
             ) : kabelInputMode === "manual" ? (
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
@@ -2418,10 +2442,6 @@ export default function PVConfigurator() {
                   </select>
                 </div>
                 <div>
-                  <div style={label}>Aantal</div>
-                  <input type="number" min={1} step={1} value={kabelInverterCount} onChange={(e) => setKabelInverterCount(e.target.value === "" ? "" : Number(e.target.value))} style={{ width: 70 }} />
-                </div>
-                <div>
                   <div style={label}>Fasen</div>
                   <select value={kabelPhases} onChange={(e) => setKabelPhases(Number(e.target.value))} style={{ width: 100 }}>
                     <option value={1}>1-fase</option>
@@ -2429,7 +2449,7 @@ export default function PVConfigurator() {
                   </select>
                 </div>
                 <div style={{ fontSize: 13, ...muted, padding: "8px 0" }}>
-                  → {kabelCurrentA.toFixed(1)} A totaal
+                  → {kabelCurrentA.toFixed(1)} A per omvormer
                 </div>
               </div>
             )}
@@ -2437,7 +2457,7 @@ export default function PVConfigurator() {
 
           <div style={{ ...card, marginBottom: 20 }}>
             <div style={{ fontWeight: 500, marginBottom: 12 }}>AC-kabel</div>
-            {renderCableCheck({ length: kabelLength, setLength: setKabelLength, installMethod: kabelInstallMethod, setInstallMethod: setKabelInstallMethod, result: kabelResult })}
+            {renderCableCheck({ length: kabelLength, setLength: setKabelLength, installMethod: kabelInstallMethod, setInstallMethod: setKabelInstallMethod, rows: kabelRows })}
           </div>
         </>
       )}
